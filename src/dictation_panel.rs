@@ -230,8 +230,7 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // Capture the currently active X11 window before we show ours,
-        // then restore focus to it after a short delay.
+        // Capture the currently active X11 window before we raise ours.
         let prev_focus = std::process::Command::new("xdotool")
             .arg("getactivewindow")
             .output()
@@ -241,10 +240,15 @@ impl DictationPanel {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        self.window.show();
+        // present() raises the window and maps it if hidden — needed so it
+        // appears on top even when already open behind other windows.
+        self.window.present();
 
+        // Return keyboard focus to the previous app after the window has mapped.
+        // xdotool windowfocus only changes keyboard focus, not Z-order, so the
+        // panel stays visible on top while the other app regains the cursor.
         if let Some(wid) = prev_focus {
-            glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+            glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
                 let _ = std::process::Command::new("xdotool")
                     .args(["windowfocus", "--sync", &wid])
                     .spawn();
