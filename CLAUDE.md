@@ -82,12 +82,12 @@ When starting work on a task: `backlog task edit <id> -s "In Progress"`
 When done: `backlog task edit <id> -s "Done"`
 
 **Current open tasks** (run `backlog task list --plain` for live status):
-- TASK-1 `[HIGH]` Wayland text injection via ydotool
-- TASK-2 `[MEDIUM]` Segment-by-segment injection while whisper streams
-- TASK-4 `[MEDIUM]` Wayland global shortcut capture
+- TASK-2 `[HIGH]` Segment-by-segment injection while whisper streams
+- TASK-5 `[MEDIUM]` Custom tray/overlay icons
 - TASK-6 `[MEDIUM]` Rust integration tests
+- TASK-1 `[LOW]` Wayland text injection via ydotool
 - TASK-3 `[LOW]` Wayland overlay via gtk4-layer-shell
-- TASK-5 `[LOW]` Custom tray/overlay icons
+- TASK-4 `[LOW]` Wayland global shortcut capture
 
 ### Known working (as of initial release)
 - Global shortcut toggle, microphone capture, WAV→sidecar→transcription

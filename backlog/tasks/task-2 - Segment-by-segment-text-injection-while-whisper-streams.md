@@ -4,9 +4,10 @@ title: Segment-by-segment text injection while whisper streams
 status: To Do
 assignee: []
 created_date: '2026-05-14 16:45'
+updated_date: '2026-05-14 16:52'
 labels: []
 dependencies: []
-priority: medium
+priority: high
 ordinal: 2000
 ---
 
