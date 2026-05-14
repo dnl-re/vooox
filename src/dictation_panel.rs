@@ -136,6 +136,12 @@ impl DictationPanel {
             .build();
         window.set_child(Some(&vbox));
 
+        // hide instead of destroy when the user closes the window
+        window.connect_close_request(|win| {
+            win.hide();
+            glib::Propagation::Stop
+        });
+
         // ── button handlers ───────────────────────────────────────────────
         {
             let tv = text_view.clone();
