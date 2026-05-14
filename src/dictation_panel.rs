@@ -230,8 +230,26 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // show without stealing focus — present() would explicitly request focus
+        // Capture the currently active X11 window before we show ours,
+        // then restore focus to it after a short delay.
+        let prev_focus = std::process::Command::new("xdotool")
+            .arg("getactivewindow")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         self.window.show();
+
+        if let Some(wid) = prev_focus {
+            glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["windowfocus", "--sync", &wid])
+                    .spawn();
+            });
+        }
     }
 
     pub fn show_processing(&self) {
