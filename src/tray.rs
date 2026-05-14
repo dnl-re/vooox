@@ -4,7 +4,7 @@ use ksni::{menu, MenuItem, Tray};
 
 pub enum TrayCommand {
     OpenSettings,
-    OpenHistory,
+    ShowPanel,
     Quit,
 }
 
@@ -40,9 +40,9 @@ impl Tray for VoooxTray {
                 ..Default::default()
             }),
             MenuItem::Standard(menu::StandardItem {
-                label: "Verlauf".into(),
+                label: "Diktierfenster".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let _ = t.tx.send(TrayCommand::OpenHistory);
+                    let _ = t.tx.send(TrayCommand::ShowPanel);
                 }),
                 ..Default::default()
             }),

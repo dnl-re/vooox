@@ -1,8 +1,7 @@
 mod audio;
 mod config;
+mod dictation_panel;
 mod history;
-mod history_window;
-mod overlay;
 mod settings;
 mod shortcuts;
 mod text_inject;
@@ -10,7 +9,8 @@ mod tray;
 mod whisper_client;
 
 use crate::config::Config;
-use crate::history::{History, HistoryEntry};
+use crate::dictation_panel::DictationPanel;
+use crate::history::History;
 use crate::tray::TrayCommand;
 use crate::whisper_client::WhisperClient;
 use crossbeam_channel::bounded;
@@ -25,7 +25,6 @@ use std::rc::Rc;
 // ── sidecar management ────────────────────────────────────────────────────
 
 pub fn spawn_sidecar() -> Result<(Child, u16), String> {
-    // development: cwd/whisper_server/server.py; installed: next to binary
     let candidates = [
         std::path::PathBuf::from("whisper_server/server.py"),
         std::env::current_exe()
@@ -133,17 +132,10 @@ fn build_ui(app: &Application) {
 
     let tray_handle = tray::spawn_tray(tray_tx);
 
-    let injector: Rc<RefCell<Box<dyn text_inject::TextInjector>>> =
-        Rc::new(RefCell::new(match text_inject::create_injector() {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("[inject] {e}");
-                Box::new(text_inject::WaylandInjectorStub)
-            }
-        }));
-
     let history = Rc::new(RefCell::new(History::load()));
-    let overlay = Rc::new(overlay::OverlayWindow::new(app));
+    let panel = Rc::new(DictationPanel::new(app));
+    panel.load_history(&history.borrow());
+
     let recording = Rc::new(RefCell::new(false));
     let recorder: Rc<RefCell<Option<audio::Recorder>>> = Rc::new(RefCell::new(None));
 
@@ -154,10 +146,9 @@ fn build_ui(app: &Application) {
         .or_else(audio::default_input_device);
 
     {
-        let overlay = Rc::clone(&overlay);
+        let panel = Rc::clone(&panel);
         let recording = Rc::clone(&recording);
         let recorder = Rc::clone(&recorder);
-        let injector = Rc::clone(&injector);
         let history = Rc::clone(&history);
         let config = Rc::clone(&config);
         let tray_handle = tray_handle.clone();
@@ -175,7 +166,7 @@ fn build_ui(app: &Application) {
                                     rec.sample_rate, rec.channels);
                                 *recorder.borrow_mut() = Some(rec);
                                 *recording.borrow_mut() = true;
-                                overlay.show_recording();
+                                panel.show_recording(dev);
                                 if let Some(ref h) = tray_handle {
                                     tray::set_recording(h, true);
                                 }
@@ -187,7 +178,7 @@ fn build_ui(app: &Application) {
                     }
                 } else {
                     *recording.borrow_mut() = false;
-                    overlay.show_processing();
+                    panel.show_processing();
                     if let Some(ref h) = tray_handle {
                         tray::set_recording(h, false);
                     }
@@ -204,7 +195,6 @@ fn build_ui(app: &Application) {
                         eprintln!("[audio] WAV size: {} bytes", wav.len());
                         let cfg = config.borrow().clone();
                         let client = WhisperClient::new(port);
-                        // segments arrive one by one; channel close = transcription done
                         let (seg_tx, seg_rx) = bounded::<Result<String, String>>(32);
 
                         std::thread::spawn(move || {
@@ -217,18 +207,10 @@ fn build_ui(app: &Application) {
                                 eprintln!("[whisper] error: {e:?}");
                                 let _ = seg_tx.send(Err(e));
                             }
-                            // seg_tx drops here → Disconnected signals "done"
                         });
 
-                        let overlay2 = Rc::clone(&overlay);
-                        let injector2 = Rc::clone(&injector);
+                        let panel2 = Rc::clone(&panel);
                         let history2 = Rc::clone(&history);
-
-                        // segments received before the 150ms focus-restore delay are queued;
-                        // afterwards they are injected immediately
-                        let seg_queue: Rc<RefCell<Vec<String>>> =
-                            Rc::new(RefCell::new(Vec::new()));
-                        let delay_done = Rc::new(RefCell::new(false));
                         let full_text = Rc::new(RefCell::new(String::new()));
 
                         glib::timeout_add_local(
@@ -237,70 +219,22 @@ fn build_ui(app: &Application) {
                                 loop {
                                     match seg_rx.try_recv() {
                                         Ok(Ok(seg)) => {
-                                            if *delay_done.borrow() {
-                                                // focus already restored — inject right away
-                                                let to_inject =
-                                                    space_join(&full_text.borrow(), &seg);
-                                                full_text.borrow_mut().push_str(&to_inject);
-                                                if let Err(e) = injector2
-                                                    .borrow_mut()
-                                                    .type_text(&to_inject)
-                                                {
-                                                    eprintln!("[inject] {e}");
-                                                }
-                                            } else {
-                                                // still waiting for focus: buffer
-                                                let is_first =
-                                                    seg_queue.borrow().is_empty();
-                                                seg_queue.borrow_mut().push(seg);
-                                                if is_first {
-                                                    // hide overlay once on first segment
-                                                    overlay2.hide();
-                                                    let queue = Rc::clone(&seg_queue);
-                                                    let inj = Rc::clone(&injector2);
-                                                    let ft = Rc::clone(&full_text);
-                                                    let dd = Rc::clone(&delay_done);
-                                                    glib::timeout_add_local_once(
-                                                        std::time::Duration::from_millis(150),
-                                                        move || {
-                                                            *dd.borrow_mut() = true;
-                                                            let segs = std::mem::take(
-                                                                &mut *queue.borrow_mut(),
-                                                            );
-                                                            let text = join_segments(&segs);
-                                                            ft.borrow_mut()
-                                                                .push_str(&text);
-                                                            if let Err(e) = inj
-                                                                .borrow_mut()
-                                                                .type_text(&text)
-                                                            {
-                                                                eprintln!("[inject] {e}");
-                                                            }
-                                                        },
-                                                    );
-                                                }
-                                            }
+                                            panel2.append_segment(&seg);
+                                            full_text.borrow_mut().push_str(
+                                                &crate::space_join(&full_text.borrow(), &seg),
+                                            );
                                         }
                                         Ok(Err(e)) => {
                                             eprintln!("[whisper] {e}");
-                                            overlay2.hide();
+                                            panel2.finish("", &cfg, &mut history2.borrow_mut());
                                             return glib::ControlFlow::Break;
                                         }
                                         Err(crossbeam_channel::TryRecvError::Empty) => {
                                             return glib::ControlFlow::Continue;
                                         }
                                         Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                                            // all segments processed — save history
                                             let text = full_text.borrow().clone();
-                                            if !text.is_empty() {
-                                                history2.borrow_mut().push(HistoryEntry {
-                                                    text,
-                                                    timestamp: history::now_rfc3339(),
-                                                    model: cfg.model.clone(),
-                                                    language: cfg.language.clone(),
-                                                });
-                                            }
-                                            overlay2.hide(); // no-op if already hidden
+                                            panel2.finish(&text, &cfg, &mut history2.borrow_mut());
                                             return glib::ControlFlow::Break;
                                         }
                                     }
@@ -318,8 +252,8 @@ fn build_ui(app: &Application) {
                         settings::SettingsWindow::new(&app_clone, Rc::clone(&config), port)
                             .show();
                     }
-                    TrayCommand::OpenHistory => {
-                        history_window::show_history_window(&app_clone, Rc::clone(&history));
+                    TrayCommand::ShowPanel => {
+                        panel.present();
                     }
                     TrayCommand::Quit => app_clone.quit(),
                 }
@@ -329,30 +263,15 @@ fn build_ui(app: &Application) {
         });
     }
 
-    // keep GTK alive (tray-driven app, no persistent main window)
     let _hold = app.hold();
 
-    // kill sidecar when the GTK app shuts down
     let pid = sidecar.id() as libc::pid_t;
-    std::mem::forget(sidecar); // don't kill on build_ui return
+    std::mem::forget(sidecar);
     app.connect_shutdown(move |_| {
         unsafe { libc::kill(pid, libc::SIGTERM) };
     });
 }
 
-/// Join multiple segments with a space where needed (server strips whitespace).
-fn join_segments(segs: &[String]) -> String {
-    let mut out = String::new();
-    for seg in segs {
-        if !out.is_empty() && !out.ends_with(' ') && !seg.starts_with(' ') {
-            out.push(' ');
-        }
-        out.push_str(seg);
-    }
-    out
-}
-
-/// Return the text to append when injecting a new segment after existing text.
 fn space_join(existing: &str, seg: &str) -> String {
     if !existing.is_empty() && !existing.ends_with(' ') && !seg.starts_with(' ') {
         format!(" {seg}")
