@@ -204,52 +204,107 @@ fn build_ui(app: &Application) {
                         eprintln!("[audio] WAV size: {} bytes", wav.len());
                         let cfg = config.borrow().clone();
                         let client = WhisperClient::new(port);
-                        let (done_tx, done_rx) = bounded::<Result<String, String>>(1);
+                        // segments arrive one by one; channel close = transcription done
+                        let (seg_tx, seg_rx) = bounded::<Result<String, String>>(32);
 
                         std::thread::spawn(move || {
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             let result = rt.block_on(client.transcribe(&wav, |seg| {
                                 eprintln!("[whisper] segment: {seg:?}");
+                                let _ = seg_tx.send(Ok(seg));
                             }));
-                            eprintln!("[whisper] done: {result:?}");
-                            let _ = done_tx.send(result);
+                            if let Err(e) = result {
+                                eprintln!("[whisper] error: {e:?}");
+                                let _ = seg_tx.send(Err(e));
+                            }
+                            // seg_tx drops here → Disconnected signals "done"
                         });
 
                         let overlay2 = Rc::clone(&overlay);
                         let injector2 = Rc::clone(&injector);
                         let history2 = Rc::clone(&history);
 
+                        // segments received before the 150ms focus-restore delay are queued;
+                        // afterwards they are injected immediately
+                        let seg_queue: Rc<RefCell<Vec<String>>> =
+                            Rc::new(RefCell::new(Vec::new()));
+                        let delay_done = Rc::new(RefCell::new(false));
+                        let full_text = Rc::new(RefCell::new(String::new()));
+
                         glib::timeout_add_local(
                             std::time::Duration::from_millis(50),
-                            move || match done_rx.try_recv() {
-                                Ok(Ok(text)) if !text.is_empty() => {
-                                    // hide overlay first so focus returns to the target window
-                                    overlay2.hide();
-                                    let inj = Rc::clone(&injector2);
-                                    let hist = Rc::clone(&history2);
-                                    let cfg2 = cfg.clone();
-                                    // wait 150ms for the compositor to restore focus, then inject
-                                    glib::timeout_add_local_once(
-                                        std::time::Duration::from_millis(150),
-                                        move || {
-                                            if let Err(e) = inj.borrow_mut().type_text(&text) {
-                                                eprintln!("[inject] {e}");
+                            move || {
+                                loop {
+                                    match seg_rx.try_recv() {
+                                        Ok(Ok(seg)) => {
+                                            if *delay_done.borrow() {
+                                                // focus already restored — inject right away
+                                                let to_inject =
+                                                    space_join(&full_text.borrow(), &seg);
+                                                full_text.borrow_mut().push_str(&to_inject);
+                                                if let Err(e) = injector2
+                                                    .borrow_mut()
+                                                    .type_text(&to_inject)
+                                                {
+                                                    eprintln!("[inject] {e}");
+                                                }
+                                            } else {
+                                                // still waiting for focus: buffer
+                                                let is_first =
+                                                    seg_queue.borrow().is_empty();
+                                                seg_queue.borrow_mut().push(seg);
+                                                if is_first {
+                                                    // hide overlay once on first segment
+                                                    overlay2.hide();
+                                                    let queue = Rc::clone(&seg_queue);
+                                                    let inj = Rc::clone(&injector2);
+                                                    let ft = Rc::clone(&full_text);
+                                                    let dd = Rc::clone(&delay_done);
+                                                    glib::timeout_add_local_once(
+                                                        std::time::Duration::from_millis(150),
+                                                        move || {
+                                                            *dd.borrow_mut() = true;
+                                                            let segs = std::mem::take(
+                                                                &mut *queue.borrow_mut(),
+                                                            );
+                                                            let text = join_segments(&segs);
+                                                            ft.borrow_mut()
+                                                                .push_str(&text);
+                                                            if let Err(e) = inj
+                                                                .borrow_mut()
+                                                                .type_text(&text)
+                                                            {
+                                                                eprintln!("[inject] {e}");
+                                                            }
+                                                        },
+                                                    );
+                                                }
                                             }
-                                            hist.borrow_mut().push(HistoryEntry {
-                                                text,
-                                                timestamp: history::now_rfc3339(),
-                                                model: cfg2.model.clone(),
-                                                language: cfg2.language.clone(),
-                                            });
-                                        },
-                                    );
-                                    glib::ControlFlow::Break
+                                        }
+                                        Ok(Err(e)) => {
+                                            eprintln!("[whisper] {e}");
+                                            overlay2.hide();
+                                            return glib::ControlFlow::Break;
+                                        }
+                                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                                            return glib::ControlFlow::Continue;
+                                        }
+                                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                                            // all segments processed — save history
+                                            let text = full_text.borrow().clone();
+                                            if !text.is_empty() {
+                                                history2.borrow_mut().push(HistoryEntry {
+                                                    text,
+                                                    timestamp: history::now_rfc3339(),
+                                                    model: cfg.model.clone(),
+                                                    language: cfg.language.clone(),
+                                                });
+                                            }
+                                            overlay2.hide(); // no-op if already hidden
+                                            return glib::ControlFlow::Break;
+                                        }
+                                    }
                                 }
-                                Ok(_) => { overlay2.hide(); glib::ControlFlow::Break }
-                                Err(crossbeam_channel::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
-                                }
-                                Err(_) => { overlay2.hide(); glib::ControlFlow::Break }
                             },
                         );
                     }
@@ -283,6 +338,27 @@ fn build_ui(app: &Application) {
     app.connect_shutdown(move |_| {
         unsafe { libc::kill(pid, libc::SIGTERM) };
     });
+}
+
+/// Join multiple segments with a space where needed (server strips whitespace).
+fn join_segments(segs: &[String]) -> String {
+    let mut out = String::new();
+    for seg in segs {
+        if !out.is_empty() && !out.ends_with(' ') && !seg.starts_with(' ') {
+            out.push(' ');
+        }
+        out.push_str(seg);
+    }
+    out
+}
+
+/// Return the text to append when injecting a new segment after existing text.
+fn space_join(existing: &str, seg: &str) -> String {
+    if !existing.is_empty() && !existing.ends_with(' ') && !seg.starts_with(' ') {
+        format!(" {seg}")
+    } else {
+        seg.to_string()
+    }
 }
 
 fn show_error_dialog(app: &Application, msg: &str) {

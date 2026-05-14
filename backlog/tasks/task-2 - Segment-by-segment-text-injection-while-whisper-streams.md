@@ -1,10 +1,10 @@
 ---
 id: TASK-2
 title: Segment-by-segment text injection while whisper streams
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-05-14 16:45'
-updated_date: '2026-05-14 16:52'
+updated_date: '2026-05-14 17:00'
 labels: []
 dependencies: []
 priority: high
