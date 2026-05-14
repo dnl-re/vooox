@@ -16,16 +16,17 @@ const CSS: &str = r#"
 .status-idle { color: #888888; }
 .copy-btn-done { background-color: #26a269; color: white; }
 .history-time  { font-size: 11px; color: #888888; }
+.toast { color: #26a269; font-size: 12px; }
 "#;
 
 pub struct DictationPanel {
-    app: Application,
     window: ApplicationWindow,
     status_label: Label,
     timer_label: Label,
     level_bar: LevelBar,
     text_view: TextView,
     copy_btn: Button,
+    toast_label: Label,
     history_list: ListBox,
     level_meter: Rc<RefCell<Option<audio::LevelMeter>>>,
     timer_source: Rc<RefCell<Option<glib::SourceId>>>,
@@ -82,13 +83,15 @@ impl DictationPanel {
             .build();
         text_scroll.set_child(Some(&text_view));
 
-        // ── buttons ───────────────────────────────────────────────────────
+        // ── buttons + toast ───────────────────────────────────────────────
         let clear_btn = Button::with_label("Leeren");
         let copy_btn = Button::with_label("Kopieren");
         copy_btn.set_halign(gtk4::Align::End);
 
-        let spacer = GtkBox::new(Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
+        let toast_label = Label::new(None);
+        toast_label.add_css_class("toast");
+        toast_label.set_hexpand(true);
+        toast_label.set_xalign(0.5);
 
         let btn_box = GtkBox::new(Orientation::Horizontal, 8);
         btn_box.set_margin_top(4);
@@ -96,7 +99,7 @@ impl DictationPanel {
         btn_box.set_margin_start(12);
         btn_box.set_margin_end(12);
         btn_box.append(&clear_btn);
-        btn_box.append(&spacer);
+        btn_box.append(&toast_label);
         btn_box.append(&copy_btn);
 
         // ── history ───────────────────────────────────────────────────────
@@ -159,13 +162,13 @@ impl DictationPanel {
         }
 
         DictationPanel {
-            app: app.clone(),
             window,
             status_label,
             timer_label,
             level_bar,
             text_view,
             copy_btn,
+            toast_label,
             history_list,
             level_meter: Rc::new(RefCell::new(None)),
             timer_source: Rc::new(RefCell::new(None)),
@@ -271,16 +274,12 @@ impl DictationPanel {
             display.clipboard().set_text(full_text);
         }
 
-        // desktop notification
-        let preview: String = full_text.chars().take(60).collect();
-        let body = if full_text.len() > 60 {
-            format!("{}… — in Zwischenablage kopiert", preview)
-        } else {
-            format!("{} — in Zwischenablage kopiert", preview)
-        };
-        let notif = gtk4::gio::Notification::new("vooox");
-        notif.set_body(Some(&body));
-        self.app.send_notification(None, &notif);
+        // in-window toast
+        self.toast_label.set_text("✓ In Zwischenablage kopiert");
+        let lbl = self.toast_label.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+            lbl.set_text("");
+        });
 
         // flash copy button
         self.copy_btn.set_label("✓ Kopiert!");
