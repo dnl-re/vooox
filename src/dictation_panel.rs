@@ -31,6 +31,9 @@ pub struct DictationPanel {
     level_meter: Rc<RefCell<Option<audio::LevelMeter>>>,
     timer_source: Rc<RefCell<Option<glib::SourceId>>>,
     timer_seconds: Rc<RefCell<u32>>,
+    // Text that existed before current recording; empty in replace-mode.
+    // set_transcript() writes base_text + new_text so streaming never duplicates.
+    base_text: Rc<RefCell<String>>,
 }
 
 impl DictationPanel {
@@ -179,6 +182,7 @@ impl DictationPanel {
             level_meter: Rc::new(RefCell::new(None)),
             timer_source: Rc::new(RefCell::new(None)),
             timer_seconds: Rc::new(RefCell::new(0)),
+            base_text: Rc::new(RefCell::new(String::new())),
         }
     }
 
@@ -188,8 +192,20 @@ impl DictationPanel {
             id.remove();
         }
 
-        // clear text for new dictation
-        self.text_view.buffer().set_text("");
+        // Append mode: cursor is in the text view — keep existing text as base.
+        // Replace mode: clear buffer.
+        if self.text_view.has_focus() {
+            let buf = self.text_view.buffer();
+            let mut existing: String = buf.text(&buf.start_iter(), &buf.end_iter(), false).into();
+            if !existing.is_empty() && !existing.ends_with(' ') {
+                existing.push(' ');
+                buf.insert(&mut buf.end_iter(), " ");
+            }
+            *self.base_text.borrow_mut() = existing;
+        } else {
+            self.text_view.buffer().set_text("");
+            *self.base_text.borrow_mut() = String::new();
+        }
 
         // status
         self.status_label.set_text("● Aufnahme");
@@ -271,9 +287,17 @@ impl DictationPanel {
         self.status_label.add_css_class("status-proc");
     }
 
-    /// Replace the entire transcript (used for live interim updates).
+    pub fn text_view_text(&self) -> String {
+        let buf = self.text_view.buffer();
+        buf.text(&buf.start_iter(), &buf.end_iter(), false).into()
+    }
+
+    /// Replace the streaming portion of the transcript.
+    /// Always writes base_text + text so repeated calls never duplicate content.
     pub fn set_transcript(&self, text: &str) {
-        self.text_view.buffer().set_text(text);
+        let base = self.base_text.borrow();
+        let full = format!("{}{}", *base, text);
+        self.text_view.buffer().set_text(&full);
     }
 
     /// Append a whisper segment to the live transcript.

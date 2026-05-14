@@ -295,7 +295,6 @@ fn build_ui(app: &Application) {
                         let panel2 = Rc::clone(&panel);
                         let history2 = Rc::clone(&history);
                         let full_text = Rc::new(RefCell::new(String::new()));
-                        // first arriving segment clears the interim streaming text
                         let first_seg = Rc::new(RefCell::new(true));
 
                         glib::timeout_add_local(
@@ -323,7 +322,7 @@ fn build_ui(app: &Application) {
                                             return glib::ControlFlow::Continue;
                                         }
                                         Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                                            let text = full_text.borrow().clone();
+                                            let text = panel2.text_view_text();
                                             panel2.finish(&text, &cfg, &mut history2.borrow_mut());
                                             return glib::ControlFlow::Break;
                                         }
