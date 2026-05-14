@@ -67,3 +67,35 @@ This follows whatever input device is set in GNOME Sound Settings.
 ```bash
 python3 tests/gen_fixtures.py   # requires espeak-ng
 ```
+
+## Status
+
+### Working
+- Global shortcut (toggle record/stop) via rdev
+- Microphone capture via cpal; `stop_and_take()` drops stream before Arc::try_unwrap
+- WAV encoding + base64 transport to sidecar (100 MB WS frame limit)
+- faster-whisper transcription with streaming segments
+- Text injection: `ydotool` → `xdotool` → `enigo` fallback chain
+- Overlay hidden 150 ms before inject so compositor can restore focus
+- Settings window: radio-button mic list (one entry per physical card), live LevelBar
+- System tray via ksni 0.3 blocking
+- Transcription history (50 entries, JSONL)
+
+### Known limitations
+- Text injection into **Wayland-native windows** (GNOME Terminal, Firefox Wayland mode)
+  requires `ydotool` + the `ydotoold` user service. `xdotool` is installed and works
+  for XWayland apps. Without ydotool, injection silently succeeds (returns Ok) but
+  nothing appears — enigo/XTest events are dropped by the Wayland compositor.
+- Mic list uses `sysdefault:CARD=*` ALSA names. Friendly names come from
+  `/proc/asound/cards` (e.g. "Jabra Link 380"). New session: verify card names still
+  match if user changes hardware.
+- No live segment streaming to cursor yet — full text injected once after `done`.
+- `data/icons/` is empty; tray and overlay use no custom icon yet.
+- 22 compiler warnings (mostly unused `pub` methods); harmless.
+
+### Not yet implemented
+- Wayland overlay positioning (gtk4-layer-shell)
+- Wayland shortcut capture (currently relies on XWayland via rdev)
+- Segment-by-segment injection as whisper streams (currently waits for `done`)
+- Custom tray/overlay icons
+- Rust integration tests in `tests/integration/` (directory exists, files not written)
