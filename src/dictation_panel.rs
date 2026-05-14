@@ -19,6 +19,7 @@ const CSS: &str = r#"
 "#;
 
 pub struct DictationPanel {
+    app: Application,
     window: ApplicationWindow,
     status_label: Label,
     timer_label: Label,
@@ -158,6 +159,7 @@ impl DictationPanel {
         }
 
         DictationPanel {
+            app: app.clone(),
             window,
             status_label,
             timer_label,
@@ -268,6 +270,17 @@ impl DictationPanel {
         if let Some(display) = gtk4::gdk::Display::default() {
             display.clipboard().set_text(full_text);
         }
+
+        // desktop notification
+        let preview: String = full_text.chars().take(60).collect();
+        let body = if full_text.len() > 60 {
+            format!("{}… — in Zwischenablage kopiert", preview)
+        } else {
+            format!("{} — in Zwischenablage kopiert", preview)
+        };
+        let notif = gtk4::gio::Notification::new("vooox");
+        notif.set_body(Some(&body));
+        self.app.send_notification(None, &notif);
 
         // flash copy button
         self.copy_btn.set_label("✓ Kopiert!");
