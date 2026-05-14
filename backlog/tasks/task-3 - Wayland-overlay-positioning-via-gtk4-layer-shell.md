@@ -4,10 +4,11 @@ title: Wayland overlay positioning via gtk4-layer-shell
 status: To Do
 assignee: []
 created_date: '2026-05-14 16:45'
+updated_date: '2026-05-14 17:58'
 labels: []
 dependencies: []
 priority: low
-ordinal: 3000
+ordinal: 13000
 ---
 
 ## Description

@@ -4,11 +4,11 @@ title: Custom tray and overlay icons
 status: To Do
 assignee: []
 created_date: '2026-05-14 16:45'
-updated_date: '2026-05-14 16:52'
+updated_date: '2026-05-14 17:58'
 labels: []
 dependencies: []
 priority: medium
-ordinal: 5000
+ordinal: 10000
 ---
 
 ## Description

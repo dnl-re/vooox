@@ -4,11 +4,11 @@ title: Wayland global shortcut capture
 status: To Do
 assignee: []
 created_date: '2026-05-14 16:45'
-updated_date: '2026-05-14 16:52'
+updated_date: '2026-05-14 17:58'
 labels: []
 dependencies: []
 priority: low
-ordinal: 4000
+ordinal: 14000
 ---
 
 ## Description

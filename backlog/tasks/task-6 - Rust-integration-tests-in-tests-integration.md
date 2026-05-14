@@ -4,10 +4,11 @@ title: Rust integration tests in tests/integration/
 status: To Do
 assignee: []
 created_date: '2026-05-14 16:45'
+updated_date: '2026-05-14 17:58'
 labels: []
 dependencies: []
 priority: medium
-ordinal: 6000
+ordinal: 11000
 ---
 
 ## Description

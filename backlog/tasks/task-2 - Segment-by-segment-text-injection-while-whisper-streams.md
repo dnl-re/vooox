@@ -4,7 +4,7 @@ title: Segment-by-segment text injection while whisper streams
 status: Done
 assignee: []
 created_date: '2026-05-14 16:45'
-updated_date: '2026-05-14 17:00'
+updated_date: '2026-05-14 18:14'
 labels: []
 dependencies: []
 priority: high
@@ -23,3 +23,9 @@ Currently the full transcription text is injected only after the whisper 'done' 
 - [ ] #2 A separator (space) is inserted between segments
 - [ ] #3 Overlay remains visible until all segments are injected
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented live streaming transcription: every 3s of accumulated audio is sent to whisper in a background thread, interim result shown in panel. Final transcription after stop clears interim and streams segments. Also added Recorder::peek_samples() and sample_count().
+<!-- SECTION:FINAL_SUMMARY:END -->
