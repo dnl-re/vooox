@@ -230,11 +230,17 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // On GNOME Wayland, show() maps the surface without sending an
-        // xdg-activation token, so the compositor does not grant focus.
-        // present() sends an explicit focus request and steals focus;
-        // xdotool cannot restore focus to Wayland-native windows afterward.
-        self.window.show();
+        // Set _NET_WM_USER_TIME = 0 on the X11 surface before mapping.
+        // This signals to the WM that the window was not opened in response
+        // to a recent user action, so it raises without granting focus.
+        gtk4::prelude::WidgetExt::realize(&self.window);
+        if let Some(surface) = self.window.surface() {
+            use glib::object::Cast;
+            if let Ok(x11) = surface.downcast::<gdk4_x11::X11Surface>() {
+                x11.set_user_time(0);
+            }
+        }
+        self.window.present();
     }
 
     pub fn show_processing(&self) {

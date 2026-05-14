@@ -110,6 +110,10 @@ fn main() -> glib::ExitCode {
 // ── GTK app ───────────────────────────────────────────────────────────────
 
 fn build_ui(app: &Application) {
+    if let Some(display) = gtk4::gdk::Display::default() {
+        eprintln!("[gdk] backend: {}", display.type_().name());
+    }
+
     let config = Rc::new(RefCell::new(Config::load()));
 
     let (mut sidecar, port) = match spawn_sidecar() {
