@@ -242,6 +242,11 @@ impl DictationPanel {
         self.status_label.add_css_class("status-proc");
     }
 
+    /// Replace the entire transcript (used for live interim updates).
+    pub fn set_transcript(&self, text: &str) {
+        self.text_view.buffer().set_text(text);
+    }
+
     /// Append a whisper segment to the live transcript.
     pub fn append_segment(&self, seg: &str) {
         let buf = self.text_view.buffer();

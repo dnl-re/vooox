@@ -170,6 +170,85 @@ fn build_ui(app: &Application) {
                                 if let Some(ref h) = tray_handle {
                                     tray::set_recording(h, true);
                                 }
+
+                                // ── live streaming transcription ──────────
+                                // Every ~200 ms check if 3 s of new audio has
+                                // accumulated; if so, send full buffer to whisper
+                                // and replace the panel text with the result.
+                                type StreamRx = crossbeam_channel::Receiver<Option<String>>;
+                                let stream_rx: Rc<RefCell<Option<StreamRx>>> =
+                                    Rc::new(RefCell::new(None));
+                                let stream_last_len: Rc<RefCell<usize>> =
+                                    Rc::new(RefCell::new(0));
+                                let stream_rec  = Rc::clone(&recorder);
+                                let stream_flag = Rc::clone(&recording);
+                                let stream_panel = Rc::clone(&panel);
+
+                                glib::timeout_add_local(
+                                    std::time::Duration::from_millis(200),
+                                    move || {
+                                        if !*stream_flag.borrow() {
+                                            return glib::ControlFlow::Break;
+                                        }
+
+                                        // collect result from in-flight call
+                                        let got: Option<String> = {
+                                            let mut rx_opt = stream_rx.borrow_mut();
+                                            if let Some(ref rx) = *rx_opt {
+                                                use crossbeam_channel::TryRecvError;
+                                                match rx.try_recv() {
+                                                    Ok(r) => { *rx_opt = None; r }
+                                                    Err(TryRecvError::Disconnected) => {
+                                                        *rx_opt = None; None
+                                                    }
+                                                    Err(TryRecvError::Empty) => None,
+                                                }
+                                            } else { None }
+                                        };
+                                        if let Some(text) = got {
+                                            if *stream_flag.borrow() {
+                                                stream_panel.set_transcript(&text);
+                                            }
+                                        }
+
+                                        // maybe start a new transcription
+                                        if stream_rx.borrow().is_none() {
+                                            let maybe_wav = {
+                                                let rec_opt = stream_rec.borrow();
+                                                rec_opt.as_ref().and_then(|rec| {
+                                                    let count = rec.sample_count();
+                                                    let min_new = (rec.sample_rate as usize)
+                                                        * (rec.channels as usize)
+                                                        * 3; // 3 s of new audio
+                                                    if count >= *stream_last_len.borrow() + min_new {
+                                                        let (s, sr, ch) = rec.peek_samples();
+                                                        Some((s, sr, ch))
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                            };
+                                            if let Some((samples, sr, ch)) = maybe_wav {
+                                                *stream_last_len.borrow_mut() = samples.len();
+                                                let mono = audio::to_mono(&samples, ch);
+                                                let wav  = audio::to_wav_bytes(&mono, sr, 1);
+                                                let (tx, rx) = bounded::<Option<String>>(1);
+                                                *stream_rx.borrow_mut() = Some(rx);
+                                                std::thread::spawn(move || {
+                                                    let rt = tokio::runtime::Runtime::new()
+                                                        .unwrap();
+                                                    let client = WhisperClient::new(port);
+                                                    let result = rt.block_on(
+                                                        client.transcribe(&wav, |_| {}),
+                                                    ).ok();
+                                                    let _ = tx.send(result);
+                                                });
+                                            }
+                                        }
+
+                                        glib::ControlFlow::Continue
+                                    },
+                                );
                             }
                             Err(e) => eprintln!("[audio] start: {e}"),
                         }
@@ -212,6 +291,8 @@ fn build_ui(app: &Application) {
                         let panel2 = Rc::clone(&panel);
                         let history2 = Rc::clone(&history);
                         let full_text = Rc::new(RefCell::new(String::new()));
+                        // first arriving segment clears the interim streaming text
+                        let first_seg = Rc::new(RefCell::new(true));
 
                         glib::timeout_add_local(
                             std::time::Duration::from_millis(50),
@@ -219,9 +300,15 @@ fn build_ui(app: &Application) {
                                 loop {
                                     match seg_rx.try_recv() {
                                         Ok(Ok(seg)) => {
-                                            panel2.append_segment(&seg);
-                                            let to_push = crate::space_join(&full_text.borrow(), &seg);
-                                            full_text.borrow_mut().push_str(&to_push);
+                                            if *first_seg.borrow() {
+                                                *first_seg.borrow_mut() = false;
+                                                panel2.set_transcript(&seg);
+                                                *full_text.borrow_mut() = seg;
+                                            } else {
+                                                panel2.append_segment(&seg);
+                                                let to_push = crate::space_join(&full_text.borrow(), &seg);
+                                                full_text.borrow_mut().push_str(&to_push);
+                                            }
                                         }
                                         Ok(Err(e)) => {
                                             eprintln!("[whisper] {e}");

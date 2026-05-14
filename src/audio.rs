@@ -151,6 +151,17 @@ impl Recorder {
         Ok(Recorder { _stream: stream, samples, sample_rate, channels })
     }
 
+    /// Number of samples captured so far (without stopping the stream).
+    pub fn sample_count(&self) -> usize {
+        self.samples.lock().unwrap().len()
+    }
+
+    /// Clone all samples captured so far without stopping the stream.
+    pub fn peek_samples(&self) -> (Vec<f32>, u32, u16) {
+        let samples = self.samples.lock().unwrap().clone();
+        (samples, self.sample_rate, self.channels)
+    }
+
     pub fn stop_and_take(self) -> Vec<f32> {
         let Recorder { _stream, samples, .. } = self;
         drop(_stream); // stop stream → callback drops its Arc clone
