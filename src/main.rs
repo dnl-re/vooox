@@ -220,9 +220,8 @@ fn build_ui(app: &Application) {
                                     match seg_rx.try_recv() {
                                         Ok(Ok(seg)) => {
                                             panel2.append_segment(&seg);
-                                            full_text.borrow_mut().push_str(
-                                                &crate::space_join(&full_text.borrow(), &seg),
-                                            );
+                                            let to_push = crate::space_join(&full_text.borrow(), &seg);
+                                            full_text.borrow_mut().push_str(&to_push);
                                         }
                                         Ok(Err(e)) => {
                                             eprintln!("[whisper] {e}");
