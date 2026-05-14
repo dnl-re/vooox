@@ -2,21 +2,7 @@ pub trait TextInjector: Send {
     fn type_text(&mut self, text: &str) -> Result<(), String>;
 }
 
-// ── subprocess helpers ────────────────────────────────────────────────────
-
-fn cmd_type(program: &str, args: &[&str], text: &str) -> Result<(), String> {
-    let mut full_args: Vec<&str> = args.to_vec();
-    full_args.push(text);
-    let status = std::process::Command::new(program)
-        .args(&full_args)
-        .status()
-        .map_err(|e| format!("{program} not found: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} exited with {status}"))
-    }
-}
+// ── helpers ───────────────────────────────────────────────────────────────
 
 fn is_available(program: &str) -> bool {
     std::process::Command::new("which")
@@ -26,8 +12,65 @@ fn is_available(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Copy `text` to the system clipboard.
+/// Tries wl-copy (Wayland) then xclip (X11/XWayland).
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    // wl-copy: native Wayland clipboard
+    if is_available("wl-copy") {
+        let mut child = std::process::Command::new("wl-copy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("wl-copy spawn: {e}"))?;
+        child.stdin.as_mut().unwrap().write_all(text.as_bytes())
+            .map_err(|e| format!("wl-copy write: {e}"))?;
+        child.wait().map_err(|e| format!("wl-copy wait: {e}"))?;
+        return Ok(());
+    }
+
+    // xclip: X11 / XWayland (clipboard synced by compositor on GNOME)
+    if is_available("xclip") {
+        let mut child = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("xclip spawn: {e}"))?;
+        child.stdin.as_mut().unwrap().write_all(text.as_bytes())
+            .map_err(|e| format!("xclip write: {e}"))?;
+        child.wait().map_err(|e| format!("xclip wait: {e}"))?;
+        return Ok(());
+    }
+
+    Err("no clipboard tool found (install wl-clipboard or xclip)".into())
+}
+
+/// Simulate Ctrl+V paste keystroke.
+fn simulate_paste() -> Result<(), String> {
+    // ydotool: works for Wayland-native and XWayland
+    if is_available("ydotool") {
+        let s = std::process::Command::new("ydotool")
+            .args(["key", "29:1", "47:1", "47:0", "29:0"])
+            .status()
+            .map_err(|e| format!("ydotool key: {e}"))?;
+        if s.success() { return Ok(()); }
+    }
+
+    // xdotool: works for XWayland apps
+    if is_available("xdotool") {
+        let s = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+v"])
+            .status()
+            .map_err(|e| format!("xdotool key: {e}"))?;
+        if s.success() { return Ok(()); }
+    }
+
+    Err("no paste-key tool found (install xdotool or ydotool)".into())
+}
+
 // ── multi-strategy injector ───────────────────────────────────────────────
-// Tries in order: ydotool (Wayland) → xdotool (X11/XWayland) → enigo (X11)
+// Primary: clipboard + Ctrl+V paste (no dropped spaces, works for any length)
+// Fallback: ydotool type → enigo (X11)
 
 pub struct MultiInjector {
     enigo: Option<enigo::Enigo>,
@@ -36,38 +79,35 @@ pub struct MultiInjector {
 impl MultiInjector {
     pub fn new() -> Self {
         use enigo::{Enigo, Settings};
-        MultiInjector {
-            enigo: Enigo::new(&Settings::default()).ok(),
-        }
+        MultiInjector { enigo: Enigo::new(&Settings::default()).ok() }
     }
 }
 
 impl TextInjector for MultiInjector {
     fn type_text(&mut self, text: &str) -> Result<(), String> {
-        // ydotool: works for both Wayland-native and XWayland apps
+        // clipboard+paste: most reliable, no dropped spaces, any length
+        if copy_to_clipboard(text).is_ok() {
+            return simulate_paste();
+        }
+
+        // ydotool type: Wayland-native fallback
         if is_available("ydotool") {
-            if let Ok(()) = cmd_type("ydotool", &["type", "--"], text) {
-                return Ok(());
-            }
+            let s = std::process::Command::new("ydotool")
+                .args(["type", "--", text])
+                .status()
+                .map_err(|e| format!("ydotool: {e}"))?;
+            if s.success() { return Ok(()); }
         }
 
-        // xdotool: works for XWayland apps
-        if is_available("xdotool") {
-            if let Ok(()) = cmd_type("xdotool", &["type", "--clearmodifiers", "--"], text) {
-                return Ok(());
-            }
-        }
-
-        // enigo: X11/XTest fallback — silent no-op for Wayland-native windows
+        // enigo: X11/XTest last resort
         if let Some(ref mut e) = self.enigo {
             use enigo::Keyboard;
             return e.text(text).map_err(|e| format!("enigo: {e}"));
         }
 
         Err(
-            "No text injection backend available.\n\
-             For Wayland: sudo apt install ydotool && systemctl --user enable --now ydotool\n\
-             For X11/XWayland: sudo apt install xdotool"
+            "No injection backend available.\n\
+             Install: sudo apt install xclip xdotool"
                 .into(),
         )
     }
