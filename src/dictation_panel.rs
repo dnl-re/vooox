@@ -230,17 +230,25 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // Set _NET_WM_USER_TIME = 0 on the X11 surface before mapping.
-        // This signals to the WM that the window was not opened in response
-        // to a recent user action, so it raises without granting focus.
+        // Realize creates the X11 window without mapping it.
         gtk4::prelude::WidgetExt::realize(&self.window);
+
+        // _NET_WM_USER_TIME = 0 before mapping tells the WM this window
+        // was not opened by a recent user action → don't grant focus.
         if let Some(surface) = self.window.surface() {
             use glib::object::Cast;
             if let Ok(x11) = surface.downcast::<gdk4_x11::X11Surface>() {
                 x11.set_user_time(0);
             }
         }
-        self.window.present();
+
+        // Clear GTK's focus child so GTK itself doesn't call XSetInputFocus()
+        // for the TextView when the window is mapped.
+        gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
+
+        // show() maps the window without sending _NET_ACTIVE_WINDOW.
+        // present() would send it and override user_time=0.
+        self.window.show();
     }
 
     pub fn show_processing(&self) {
