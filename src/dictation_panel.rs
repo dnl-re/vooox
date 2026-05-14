@@ -249,6 +249,11 @@ impl DictationPanel {
         // show() maps the window without sending _NET_ACTIVE_WINDOW.
         // present() would send it and override user_time=0.
         self.window.show();
+
+        let win = self.window.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            position_center_bottom(&win);
+        });
     }
 
     pub fn show_processing(&self) {
@@ -340,6 +345,86 @@ impl DictationPanel {
 
     pub fn present(&self) {
         self.window.present();
+    }
+}
+
+fn position_center_bottom(window: &ApplicationWindow) {
+    // Parse cursor position from xdotool (X11 physical pixels).
+    let cursor_pos: Option<(i32, i32)> = std::process::Command::new("xdotool")
+        .args(["getmouselocation", "--shell"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut x = None;
+            let mut y = None;
+            for line in s.lines() {
+                if let Some(v) = line.strip_prefix("X=") {
+                    x = v.parse::<i32>().ok();
+                } else if let Some(v) = line.strip_prefix("Y=") {
+                    y = v.parse::<i32>().ok();
+                }
+            }
+            x.zip(y)
+        });
+
+    let (cursor_x, cursor_y) = match cursor_pos {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Find the GDK monitor containing the cursor.
+    // GDK geometry is in logical (scaled) pixels; multiply by scale_factor for physical.
+    let display = match gtk4::gdk::Display::default() {
+        Some(d) => d,
+        None => return,
+    };
+    let monitors = display.monitors();
+    let mut target: Option<(i32, i32, i32, i32)> = None; // (phys_x, phys_y, phys_w, phys_h)
+    for i in 0..monitors.n_items() {
+        if let Some(obj) = monitors.item(i) {
+            use glib::object::Cast;
+            if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
+                let geo = mon.geometry();
+                let scale = mon.scale_factor().max(1) as i32;
+                let px = geo.x() * scale;
+                let py = geo.y() * scale;
+                let pw = geo.width() * scale;
+                let ph = geo.height() * scale;
+                if cursor_x >= px && cursor_x < px + pw && cursor_y >= py && cursor_y < py + ph {
+                    target = Some((px, py, pw, ph));
+                    break;
+                }
+            }
+        }
+    }
+    let (mon_px, mon_py, mon_pw, mon_ph) = match target {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Window size in physical pixels. window.width()/height() return 0 before the first
+    // frame is drawn, so fall back to the default size we set in new().
+    let scale = window.scale_factor().max(1) as i32;
+    let (default_w, default_h) = window.default_size();
+    let logical_w = if window.width() > 10 { window.width() } else if default_w > 0 { default_w } else { 480 };
+    let logical_h = if window.height() > 10 { window.height() } else if default_h > 0 { default_h } else { 520 };
+    let win_w = logical_w * scale;
+    let win_h = logical_h * scale;
+    let margin = 40 * scale;
+
+    let target_x = (mon_px + (mon_pw - win_w) / 2).max(mon_px);
+    let target_y = (mon_py + mon_ph - win_h - margin).max(mon_py);
+
+    // Move via xdotool using the X11 window ID.
+    let xid: Option<u64> = window.surface().and_then(|s| {
+        use glib::object::Cast;
+        s.downcast::<gdk4_x11::X11Surface>().ok().map(|x11| x11.xid())
+    });
+    if let Some(xid) = xid {
+        let _ = std::process::Command::new("xdotool")
+            .args(["windowmove", &xid.to_string(), &target_x.to_string(), &target_y.to_string()])
+            .status();
     }
 }
 
