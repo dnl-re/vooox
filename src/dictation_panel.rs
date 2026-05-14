@@ -16,7 +16,7 @@ const CSS: &str = r#"
 .status-idle { color: #888888; }
 .copy-btn-done { background-color: #26a269; color: white; }
 .history-time  { font-size: 11px; color: #888888; }
-.toast { color: #26a269; font-size: 12px; }
+.toast { color: #26a269; font-size: 14px; }
 "#;
 
 pub struct DictationPanel {
