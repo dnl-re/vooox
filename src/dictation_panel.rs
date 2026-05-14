@@ -230,7 +230,8 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        self.window.present();
+        // show without stealing focus — present() would explicitly request focus
+        self.window.show();
     }
 
     pub fn show_processing(&self) {
