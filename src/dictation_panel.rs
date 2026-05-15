@@ -25,7 +25,6 @@ pub struct DictationPanel {
     timer_label: Label,
     level_bar: LevelBar,
     text_view: TextView,
-    copy_btn: Button,
     toast_label: Label,
     history_list: ListBox,
     level_meter: Rc<RefCell<Option<audio::LevelMeter>>>,
@@ -86,24 +85,13 @@ impl DictationPanel {
             .build();
         text_scroll.set_child(Some(&text_view));
 
-        // ── buttons + toast ───────────────────────────────────────────────
-        let clear_btn = Button::with_label("Leeren");
-        let copy_btn = Button::with_label("Kopieren");
-        copy_btn.set_halign(gtk4::Align::End);
-
+        // ── toast ─────────────────────────────────────────────────────────
         let toast_label = Label::new(None);
         toast_label.add_css_class("toast");
         toast_label.set_hexpand(true);
         toast_label.set_xalign(0.5);
-
-        let btn_box = GtkBox::new(Orientation::Horizontal, 8);
-        btn_box.set_margin_top(4);
-        btn_box.set_margin_bottom(4);
-        btn_box.set_margin_start(12);
-        btn_box.set_margin_end(12);
-        btn_box.append(&clear_btn);
-        btn_box.append(&toast_label);
-        btn_box.append(&copy_btn);
+        toast_label.set_margin_top(4);
+        toast_label.set_margin_bottom(4);
 
         // ── history ───────────────────────────────────────────────────────
         let history_list = ListBox::new();
@@ -129,7 +117,7 @@ impl DictationPanel {
         vbox.append(&header_box);
         vbox.append(&Separator::new(Orientation::Horizontal));
         vbox.append(&text_scroll);
-        vbox.append(&btn_box);
+        vbox.append(&toast_label);
         vbox.append(&Separator::new(Orientation::Horizontal));
         vbox.append(&history_expander);
 
@@ -170,38 +158,12 @@ impl DictationPanel {
 
 
 
-        // ── button handlers ───────────────────────────────────────────────
-        {
-            let tv = text_view.clone();
-            clear_btn.connect_clicked(move |_| {
-                tv.buffer().set_text("");
-            });
-        }
-        {
-            let tv = text_view.clone();
-            copy_btn.connect_clicked(move |btn| {
-                let buf = tv.buffer();
-                let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-                if let Some(display) = gtk4::gdk::Display::default() {
-                    display.clipboard().set_text(text.as_str());
-                }
-                btn.set_label("✓ Kopiert!");
-                btn.add_css_class("copy-btn-done");
-                let b = btn.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
-                    b.set_label("Kopieren");
-                    b.remove_css_class("copy-btn-done");
-                });
-            });
-        }
-
         DictationPanel {
             window,
             status_label,
             timer_label,
             level_bar,
             text_view,
-            copy_btn,
             toast_label,
             history_list,
             level_meter: Rc::new(RefCell::new(None)),
@@ -362,15 +324,6 @@ impl DictationPanel {
         let lbl = self.toast_label.clone();
         glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
             lbl.set_text("");
-        });
-
-        // flash copy button
-        self.copy_btn.set_label("✓ Kopiert!");
-        self.copy_btn.add_css_class("copy-btn-done");
-        let btn = self.copy_btn.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
-            btn.set_label("Kopieren");
-            btn.remove_css_class("copy-btn-done");
         });
 
         // persist and show in history
