@@ -240,29 +240,25 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // Realize creates the X11 window without mapping it.
-        gtk4::prelude::WidgetExt::realize(&self.window);
-
-        // _NET_WM_USER_TIME = 0 before mapping tells the WM this window
-        // was not opened by a recent user action → don't grant focus.
-        if let Some(surface) = self.window.surface() {
-            use glib::object::Cast;
-            if let Ok(x11) = surface.downcast::<gdk4_x11::X11Surface>() {
-                x11.set_user_time(0);
-            }
-        }
-
-        // Clear GTK's focus child so GTK itself doesn't call XSetInputFocus()
-        // for the TextView when the window is mapped.
+        // Clear focus child so GTK doesn't call XSetInputFocus() on the TextView.
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
 
-        // show() maps the window without sending _NET_ACTIVE_WINDOW.
-        // present() would send it and override user_time=0.
+        // show() maps the window without sending _NET_ACTIVE_WINDOW, so GNOME
+        // won't suppress it as "focus stealing" and won't show a "ready" notification.
         self.window.show();
 
         let win = self.window.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
             position_center_bottom(&win);
+            // Raise above other windows without granting keyboard focus.
+            if let Some(xid) = win.surface().and_then(|s| {
+                use glib::object::Cast;
+                s.downcast::<gdk4_x11::X11Surface>().ok().map(|x| x.xid())
+            }) {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["windowraise", &xid.to_string()])
+                    .status();
+            }
         });
     }
 
