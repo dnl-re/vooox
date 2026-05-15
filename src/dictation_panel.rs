@@ -1,6 +1,7 @@
 use crate::audio;
 use crate::config::Config;
 use crate::history::{History, HistoryEntry};
+use crate::window_state::{monitor_key, WindowState};
 use std::rc::Rc;
 use std::cell::RefCell;
 use glib;
@@ -38,6 +39,7 @@ pub struct DictationPanel {
     // Text that existed before current recording; empty in replace-mode.
     // set_transcript() writes base_text + new_text so streaming never duplicates.
     base_text: Rc<RefCell<String>>,
+    win_state: Rc<RefCell<WindowState>>,
 }
 
 impl DictationPanel {
@@ -137,11 +139,18 @@ impl DictationPanel {
             .build();
         window.set_child(Some(&vbox));
 
-        // hide instead of destroy when the user closes the window
-        window.connect_close_request(|win| {
-            win.hide();
-            glib::Propagation::Stop
-        });
+        let win_state = Rc::new(RefCell::new(WindowState::load()));
+
+        // hide instead of destroy when the user closes the window — and
+        // persist the current position keyed by monitor.
+        {
+            let state = Rc::clone(&win_state);
+            window.connect_close_request(move |win| {
+                save_window_position(win, &state);
+                win.hide();
+                glib::Propagation::Stop
+            });
+        }
 
         // drag header to move the undecorated window
         {
@@ -177,6 +186,7 @@ impl DictationPanel {
             timer_source: Rc::new(RefCell::new(None)),
             timer_seconds: Rc::new(RefCell::new(0)),
             base_text: Rc::new(RefCell::new(String::new())),
+            win_state,
         }
     }
 
@@ -251,6 +261,10 @@ impl DictationPanel {
                 if s.is_empty() { None } else { Some(s) }
             });
 
+        // Only (re)position when the window is being brought back from a hidden
+        // state — if it's already visible, the user's drag-placement stays put.
+        let was_hidden = !self.window.is_visible();
+
         // Clear focus child so GTK doesn't call XSetInputFocus() on the TextView.
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
 
@@ -259,22 +273,35 @@ impl DictationPanel {
         self.window.present();
 
         let win = self.window.clone();
+        let state = Rc::clone(&self.win_state);
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-            position_center_bottom(&win);
-            // Restore keyboard focus to user's previous app without raising it
-            // above us (windowfocus = focus only; windowactivate would also raise).
+            if was_hidden {
+                position_for_cursor(&win, &state);
+            }
+
+            let our_xid = window_xid(&win);
+
+            // Force the window onto the active stack via EWMH. windowactivate
+            // sends _NET_ACTIVE_WINDOW with the current X server time, which
+            // Mutter accepts even when GTK's own present() gets demoted to a
+            // "window ready" notification.
+            if let Some(xid) = our_xid {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["windowactivate", "--sync", &xid.to_string()])
+                    .status();
+            }
+
+            // Hand keyboard focus back to the previous app without lowering us.
             if let Some(ref xid) = prev_active {
                 let _ = std::process::Command::new("xdotool")
                     .args(["windowfocus", "--sync", xid])
                     .status();
             }
-            // Make sure we stay on top after the focus dance.
-            if let Some(our_xid) = win.surface().and_then(|s| {
-                use glib::object::Cast;
-                s.downcast::<gdk4_x11::X11Surface>().ok().map(|x| x.xid())
-            }) {
+
+            // Re-raise ourselves so the visual stack puts us on top.
+            if let Some(xid) = our_xid {
                 let _ = std::process::Command::new("xdotool")
-                    .args(["windowraise", &our_xid.to_string()])
+                    .args(["windowraise", &xid.to_string()])
                     .status();
             }
         });
@@ -371,6 +398,93 @@ impl DictationPanel {
     pub fn present(&self) {
         self.window.present();
     }
+}
+
+/// Helper: locate the GDK monitor containing physical pixel point (x, y).
+fn monitor_containing(x: i32, y: i32) -> Option<gtk4::gdk::Monitor> {
+    let display = gtk4::gdk::Display::default()?;
+    let monitors = display.monitors();
+    for i in 0..monitors.n_items() {
+        let obj = monitors.item(i)?;
+        use glib::object::Cast;
+        if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
+            let geo = mon.geometry();
+            let scale = mon.scale_factor().max(1);
+            let px = geo.x() * scale;
+            let py = geo.y() * scale;
+            let pw = geo.width() * scale;
+            let ph = geo.height() * scale;
+            if x >= px && x < px + pw && y >= py && y < py + ph {
+                return Some(mon);
+            }
+        }
+    }
+    None
+}
+
+fn cursor_position() -> Option<(i32, i32)> {
+    let out = std::process::Command::new("xdotool")
+        .args(["getmouselocation", "--shell"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut x: Option<i32> = None;
+    let mut y: Option<i32> = None;
+    for line in s.lines() {
+        if let Some(v) = line.strip_prefix("X=") { x = v.parse().ok(); }
+        else if let Some(v) = line.strip_prefix("Y=") { y = v.parse().ok(); }
+    }
+    x.zip(y)
+}
+
+fn window_xid(window: &ApplicationWindow) -> Option<u64> {
+    use glib::object::Cast;
+    window.surface().and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok()).map(|x| x.xid())
+}
+
+/// Use a saved position for the cursor's monitor if we have one; otherwise
+/// fall back to centered-bottom on that monitor.
+fn position_for_cursor(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
+    let Some((cx, cy)) = cursor_position() else { return };
+    let Some(mon) = monitor_containing(cx, cy) else { return };
+    let key = monitor_key(&mon);
+
+    if let Some((x, y)) = state.borrow().get(&key) {
+        if let Some(xid) = window_xid(window) {
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowmove", &xid.to_string(), &x.to_string(), &y.to_string()])
+                .status();
+            return;
+        }
+    }
+    position_center_bottom(window);
+}
+
+/// Read window position via xdotool and persist it keyed by the monitor the
+/// window currently sits on.
+fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
+    let Some(xid) = window_xid(window) else { return };
+    let Ok(out) = std::process::Command::new("xdotool")
+        .args(["getwindowgeometry", "--shell", &xid.to_string()])
+        .output()
+    else { return };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut x: Option<i32> = None;
+    let mut y: Option<i32> = None;
+    let mut w: Option<i32> = None;
+    let mut h: Option<i32> = None;
+    for line in s.lines() {
+        if let Some(v) = line.strip_prefix("X=") { x = v.parse().ok(); }
+        else if let Some(v) = line.strip_prefix("Y=") { y = v.parse().ok(); }
+        else if let Some(v) = line.strip_prefix("WIDTH=") { w = v.parse().ok(); }
+        else if let Some(v) = line.strip_prefix("HEIGHT=") { h = v.parse().ok(); }
+    }
+    let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) else { return };
+    let center = (x + w / 2, y + h / 2);
+    let Some(mon) = monitor_containing(center.0, center.1) else { return };
+    let mut st = state.borrow_mut();
+    st.set(monitor_key(&mon), (x, y));
+    st.save();
 }
 
 fn position_center_bottom(window: &ApplicationWindow) {

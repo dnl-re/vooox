@@ -8,6 +8,7 @@ mod sidecar;
 mod text_inject;
 mod tray;
 mod whisper_client;
+mod window_state;
 
 use crate::config::Config;
 use crate::dictation_panel::DictationPanel;
