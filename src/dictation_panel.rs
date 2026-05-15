@@ -137,7 +137,8 @@ impl DictationPanel {
             .application(app)
             .title("vooox")
             .default_width(480)
-            .default_height(520)
+            .default_height(260)
+            .decorated(false)
             .build();
         window.set_child(Some(&vbox));
 
