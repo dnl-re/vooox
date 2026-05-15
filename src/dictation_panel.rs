@@ -146,6 +146,21 @@ impl DictationPanel {
             glib::Propagation::Stop
         });
 
+        // shrink window when history is collapsed
+        {
+            let win = window.clone();
+            history_expander.connect_notify_local(Some("expanded"), move |exp, _| {
+                if !exp.is_expanded() {
+                    // toggling resizable forces GTK to recalculate the minimum window size
+                    win.set_resizable(false);
+                    let w = win.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                        w.set_resizable(true);
+                    });
+                }
+            });
+        }
+
         // ── button handlers ───────────────────────────────────────────────
         {
             let tv = text_view.clone();
