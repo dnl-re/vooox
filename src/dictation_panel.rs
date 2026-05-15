@@ -148,6 +148,26 @@ impl DictationPanel {
             glib::Propagation::Stop
         });
 
+        // drag header to move the undecorated window
+        {
+            let win = window.clone();
+            let drag = gtk4::GestureClick::new();
+            drag.set_button(1);
+            drag.connect_pressed(move |gesture, _n, x, y| {
+                if let Some(event) = gesture.last_event(None) {
+                    if let Some(surface) = win.surface() {
+                        use gtk4::gdk::prelude::ToplevelExt;
+                        if let Ok(toplevel) = surface.downcast::<gtk4::gdk::Toplevel>() {
+                            if let Some(device) = event.device() {
+                                toplevel.begin_move(&device, 1, x, y, event.time());
+                            }
+                        }
+                    }
+                }
+            });
+            header_box.add_controller(drag);
+        }
+
 
 
         // ── button handlers ───────────────────────────────────────────────
