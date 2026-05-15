@@ -69,6 +69,29 @@ impl History {
         }
     }
 
+    pub fn remove_by_timestamp(&mut self, timestamp: &str) {
+        self.entries.retain(|e| e.timestamp != timestamp);
+        self.rewrite();
+    }
+
+    fn rewrite(&self) {
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+        {
+            for entry in &self.entries {
+                if let Ok(line) = serde_json::to_string(entry) {
+                    let _ = writeln!(f, "{line}");
+                }
+            }
+        }
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &HistoryEntry> {
         self.entries.iter()
     }

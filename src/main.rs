@@ -97,7 +97,7 @@ fn build_ui(app: &Application) {
 
     let history = Rc::new(RefCell::new(History::load()));
     let panel = Rc::new(DictationPanel::new(app));
-    panel.load_history(&history.borrow());
+    panel.load_history(Rc::clone(&history));
 
     let recording = Rc::new(RefCell::new(false));
     let recorder: Rc<RefCell<Option<audio::Recorder>>> = Rc::new(RefCell::new(None));
@@ -339,7 +339,7 @@ fn spawn_segment_poll(
                 }
                 Ok(Err(e)) => {
                     eprintln!("[whisper] {e}");
-                    panel.finish("", &cfg, &mut history.borrow_mut());
+                    panel.finish("", &cfg, Rc::clone(&history));
                     return glib::ControlFlow::Break;
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => {
@@ -347,7 +347,7 @@ fn spawn_segment_poll(
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     let text = panel.text_view_text();
-                    panel.finish(&text, &cfg, &mut history.borrow_mut());
+                    panel.finish(&text, &cfg, Rc::clone(&history));
                     return glib::ControlFlow::Break;
                 }
             }

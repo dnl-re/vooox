@@ -1,14 +1,14 @@
 use crate::audio;
 use crate::config::Config;
 use crate::history::{History, HistoryEntry};
+use std::rc::Rc;
+use std::cell::RefCell;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Expander, Label, LevelBar,
     ListBox, ListBoxRow, Orientation, ScrolledWindow, Separator, TextView,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
 const CSS: &str = r#"
 .status-rec  { color: #ff4444; font-weight: bold; }
@@ -320,7 +320,7 @@ impl DictationPanel {
     }
 
     /// Called when transcription is complete: reset status, auto-copy, add history row.
-    pub fn finish(&self, full_text: &str, cfg: &Config, history: &mut History) {
+    pub fn finish(&self, full_text: &str, cfg: &Config, history: Rc<RefCell<History>>) {
         self.status_label.set_text("○ Bereit");
         self.status_label.remove_css_class("status-proc");
         self.status_label.remove_css_class("status-rec");
@@ -359,15 +359,17 @@ impl DictationPanel {
             model: cfg.model.clone(),
             language: cfg.language.clone(),
         };
-        history.push(entry.clone());
-        self.history_list.prepend(&make_history_row(&entry));
+        history.borrow_mut().push(entry.clone());
+        self.history_list
+            .prepend(&make_history_row(&entry, &self.history_list, Rc::clone(&history)));
     }
 
     /// Populate history list from persisted entries (newest first).
-    pub fn load_history(&self, history: &History) {
-        let entries: Vec<_> = history.entries().collect();
+    pub fn load_history(&self, history: Rc<RefCell<History>>) {
+        let entries: Vec<HistoryEntry> = history.borrow().entries().cloned().collect();
         for entry in entries.iter().rev() {
-            self.history_list.append(&make_history_row(entry));
+            self.history_list
+                .append(&make_history_row(entry, &self.history_list, Rc::clone(&history)));
         }
     }
 
@@ -465,7 +467,11 @@ pub(crate) fn space_join(existing: &str, seg: &str) -> String {
     }
 }
 
-fn make_history_row(entry: &HistoryEntry) -> ListBoxRow {
+fn make_history_row(
+    entry: &HistoryEntry,
+    list: &ListBox,
+    history: Rc<RefCell<History>>,
+) -> ListBoxRow {
     let row = ListBoxRow::new();
     let hbox = GtkBox::new(Orientation::Horizontal, 8);
     hbox.set_margin_top(4);
@@ -505,9 +511,22 @@ fn make_history_row(entry: &HistoryEntry) -> ListBoxRow {
         });
     }
 
+    let del_btn = Button::with_label("🗑");
+    del_btn.set_valign(gtk4::Align::Start);
+    {
+        let timestamp = entry.timestamp.clone();
+        let row_ref = row.clone();
+        let list_ref = list.clone();
+        del_btn.connect_clicked(move |_| {
+            history.borrow_mut().remove_by_timestamp(&timestamp);
+            list_ref.remove(&row_ref);
+        });
+    }
+
     hbox.append(&time_lbl);
     hbox.append(&text_lbl);
     hbox.append(&copy_btn);
+    hbox.append(&del_btn);
     row.set_child(Some(&hbox));
     row
 }
