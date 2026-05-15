@@ -4,8 +4,8 @@ use crate::history::{History, HistoryEntry};
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Label, LevelBar, ListBox,
-    ListBoxRow, Orientation, ScrolledWindow, Separator, TextView,
+    Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Expander, Label, LevelBar,
+    ListBox, ListBoxRow, Orientation, ScrolledWindow, Separator, TextView,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -106,12 +106,6 @@ impl DictationPanel {
         btn_box.append(&copy_btn);
 
         // ── history ───────────────────────────────────────────────────────
-        let history_hdr = Label::new(Some("Verlauf"));
-        history_hdr.set_xalign(0.0);
-        history_hdr.set_margin_start(12);
-        history_hdr.set_margin_top(8);
-        history_hdr.set_margin_bottom(4);
-
         let history_list = ListBox::new();
         history_list.set_selection_mode(gtk4::SelectionMode::None);
 
@@ -121,6 +115,14 @@ impl DictationPanel {
             .build();
         history_scroll.set_child(Some(&history_list));
 
+        let history_expander = Expander::new(Some("Verlauf"));
+        history_expander.set_expanded(false);
+        history_expander.set_margin_start(8);
+        history_expander.set_margin_end(8);
+        history_expander.set_margin_top(4);
+        history_expander.set_margin_bottom(4);
+        history_expander.set_child(Some(&history_scroll));
+
         // ── assemble ──────────────────────────────────────────────────────
         let vbox = GtkBox::new(Orientation::Vertical, 0);
         vbox.append(&header_box);
@@ -128,8 +130,7 @@ impl DictationPanel {
         vbox.append(&text_scroll);
         vbox.append(&btn_box);
         vbox.append(&Separator::new(Orientation::Horizontal));
-        vbox.append(&history_hdr);
-        vbox.append(&history_scroll);
+        vbox.append(&history_expander);
 
         let window = ApplicationWindow::builder()
             .application(app)
