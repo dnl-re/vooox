@@ -240,23 +240,41 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
+        // Capture the X11 window the user is currently working in so we can
+        // restore its focus after we present ourselves on top.
+        let prev_active: Option<String> = std::process::Command::new("xdotool")
+            .arg("getactivewindow")
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            });
+
         // Clear focus child so GTK doesn't call XSetInputFocus() on the TextView.
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
 
-        // show() maps the window without sending _NET_ACTIVE_WINDOW, so GNOME
-        // won't suppress it as "focus stealing" and won't show a "ready" notification.
-        self.window.show();
+        // present() maps + raises the window reliably (works on first and Nth call).
+        // It also briefly takes focus — we restore it below.
+        self.window.present();
 
         let win = self.window.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
             position_center_bottom(&win);
-            // Raise above other windows without granting keyboard focus.
-            if let Some(xid) = win.surface().and_then(|s| {
+            // Restore keyboard focus to user's previous app without raising it
+            // above us (windowfocus = focus only; windowactivate would also raise).
+            if let Some(ref xid) = prev_active {
+                let _ = std::process::Command::new("xdotool")
+                    .args(["windowfocus", "--sync", xid])
+                    .status();
+            }
+            // Make sure we stay on top after the focus dance.
+            if let Some(our_xid) = win.surface().and_then(|s| {
                 use glib::object::Cast;
                 s.downcast::<gdk4_x11::X11Surface>().ok().map(|x| x.xid())
             }) {
                 let _ = std::process::Command::new("xdotool")
-                    .args(["windowraise", &xid.to_string()])
+                    .args(["windowraise", &our_xid.to_string()])
                     .status();
             }
         });
