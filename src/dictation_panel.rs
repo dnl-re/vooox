@@ -17,6 +17,11 @@ const CSS: &str = r#"
 .copy-btn-done { background-color: #26a269; color: white; }
 .history-time  { font-size: 11px; color: #888888; }
 .toast { color: #26a269; font-size: 14px; }
+window { background: transparent; }
+.panel-root {
+    border-radius: 12px;
+    border: 1px solid alpha(currentColor, 0.12);
+}
 "#;
 
 pub struct DictationPanel {
@@ -114,6 +119,8 @@ impl DictationPanel {
 
         // ── assemble ──────────────────────────────────────────────────────
         let vbox = GtkBox::new(Orientation::Vertical, 0);
+        vbox.add_css_class("background"); // GTK4 built-in: applies @window_bg_color
+        vbox.add_css_class("panel-root");
         vbox.append(&header_box);
         vbox.append(&Separator::new(Orientation::Horizontal));
         vbox.append(&text_scroll);
