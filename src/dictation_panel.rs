@@ -452,6 +452,15 @@ fn position_center_bottom(window: &ApplicationWindow) {
     }
 }
 
+/// Join two text segments with a space if neither already has one at the boundary.
+pub(crate) fn space_join(existing: &str, seg: &str) -> String {
+    if !existing.is_empty() && !existing.ends_with(' ') && !seg.starts_with(' ') {
+        format!(" {seg}")
+    } else {
+        seg.to_string()
+    }
+}
+
 fn make_history_row(entry: &HistoryEntry) -> ListBoxRow {
     let row = ListBoxRow::new();
     let hbox = GtkBox::new(Orientation::Horizontal, 8);

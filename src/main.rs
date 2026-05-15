@@ -4,6 +4,7 @@ mod dictation_panel;
 mod history;
 mod settings;
 mod shortcuts;
+mod sidecar;
 mod text_inject;
 mod tray;
 mod whisper_client;
@@ -18,52 +19,14 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
 use std::cell::RefCell;
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 
-// ── sidecar management ────────────────────────────────────────────────────
-
-pub fn spawn_sidecar() -> Result<(Child, u16), String> {
-    let candidates = [
-        std::path::PathBuf::from("whisper_server/server.py"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../whisper_server/server.py")))
-            .unwrap_or_default(),
-    ];
-    let server_path = candidates
-        .iter()
-        .find(|p| p.exists())
-        .ok_or("whisper_server/server.py not found")?
-        .clone();
-
-    let mut child = Command::new("python3")
-        .arg(&server_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| format!("could not start sidecar: {e}"))?;
-
-    let stdout = child.stdout.take().unwrap();
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("sidecar stdout: {e}"))?;
-    let port: u16 = line
-        .trim()
-        .strip_prefix("VOOOX_PORT=")
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(|| format!("unexpected sidecar output: {line:?}"))?;
-
-    Ok((child, port))
-}
+type StreamRx = crossbeam_channel::Receiver<Option<String>>;
 
 // ── headless test-pipeline mode ───────────────────────────────────────────
 
 async fn run_test_pipeline_async(wav_path: &str) -> i32 {
-    let (mut child, port) = match spawn_sidecar() {
+    let (mut child, port) = match sidecar::spawn_sidecar() {
         Ok(x) => x,
         Err(e) => { eprintln!("sidecar error: {e}"); return 1; }
     };
@@ -110,13 +73,9 @@ fn main() -> glib::ExitCode {
 // ── GTK app ───────────────────────────────────────────────────────────────
 
 fn build_ui(app: &Application) {
-    if let Some(display) = gtk4::gdk::Display::default() {
-        eprintln!("[gdk] backend: {}", display.type_().name());
-    }
-
     let config = Rc::new(RefCell::new(Config::load()));
 
-    let (mut sidecar, port) = match spawn_sidecar() {
+    let (mut sidecar, port) = match sidecar::spawn_sidecar() {
         Ok(x) => x,
         Err(e) => {
             eprintln!("[main] sidecar failed: {e}");
@@ -159,182 +118,31 @@ fn build_ui(app: &Application) {
         let app_clone = app.clone();
 
         glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
-            // process shortcut events
             while let Ok(()) = shortcut_rx.try_recv() {
-                let is_recording = *recording.borrow();
-                if !is_recording {
-                    if let Some(ref dev) = input_device {
-                        match audio::Recorder::start(dev) {
-                            Ok(rec) => {
-                                eprintln!("[audio] recording started — {}Hz, {}ch",
-                                    rec.sample_rate, rec.channels);
-                                *recorder.borrow_mut() = Some(rec);
-                                *recording.borrow_mut() = true;
-                                panel.show_recording(dev);
-                                if let Some(ref h) = tray_handle {
-                                    tray::set_recording(h, true);
-                                }
-
-                                // ── live streaming transcription ──────────
-                                // Every ~200 ms check if 3 s of new audio has
-                                // accumulated; if so, send full buffer to whisper
-                                // and replace the panel text with the result.
-                                type StreamRx = crossbeam_channel::Receiver<Option<String>>;
-                                let stream_rx: Rc<RefCell<Option<StreamRx>>> =
-                                    Rc::new(RefCell::new(None));
-                                let stream_last_len: Rc<RefCell<usize>> =
-                                    Rc::new(RefCell::new(0));
-                                let stream_rec  = Rc::clone(&recorder);
-                                let stream_flag = Rc::clone(&recording);
-                                let stream_panel = Rc::clone(&panel);
-
-                                glib::timeout_add_local(
-                                    std::time::Duration::from_millis(200),
-                                    move || {
-                                        if !*stream_flag.borrow() {
-                                            return glib::ControlFlow::Break;
-                                        }
-
-                                        // collect result from in-flight call
-                                        let got: Option<String> = {
-                                            let mut rx_opt = stream_rx.borrow_mut();
-                                            if let Some(ref rx) = *rx_opt {
-                                                use crossbeam_channel::TryRecvError;
-                                                match rx.try_recv() {
-                                                    Ok(r) => { *rx_opt = None; r }
-                                                    Err(TryRecvError::Disconnected) => {
-                                                        *rx_opt = None; None
-                                                    }
-                                                    Err(TryRecvError::Empty) => None,
-                                                }
-                                            } else { None }
-                                        };
-                                        if let Some(text) = got {
-                                            if *stream_flag.borrow() {
-                                                stream_panel.set_transcript(&text);
-                                            }
-                                        }
-
-                                        // maybe start a new transcription
-                                        if stream_rx.borrow().is_none() {
-                                            let maybe_wav = {
-                                                let rec_opt = stream_rec.borrow();
-                                                rec_opt.as_ref().and_then(|rec| {
-                                                    let count = rec.sample_count();
-                                                    let min_new = (rec.sample_rate as usize)
-                                                        * (rec.channels as usize)
-                                                        * 3; // 3 s of new audio
-                                                    if count >= *stream_last_len.borrow() + min_new {
-                                                        let (s, sr, ch) = rec.peek_samples();
-                                                        Some((s, sr, ch))
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                            };
-                                            if let Some((samples, sr, ch)) = maybe_wav {
-                                                *stream_last_len.borrow_mut() = samples.len();
-                                                let mono = audio::to_mono(&samples, ch);
-                                                let wav  = audio::to_wav_bytes(&mono, sr, 1);
-                                                let (tx, rx) = bounded::<Option<String>>(1);
-                                                *stream_rx.borrow_mut() = Some(rx);
-                                                std::thread::spawn(move || {
-                                                    let rt = tokio::runtime::Runtime::new()
-                                                        .unwrap();
-                                                    let client = WhisperClient::new(port);
-                                                    let result = rt.block_on(
-                                                        client.transcribe(&wav, |_| {}),
-                                                    ).ok();
-                                                    let _ = tx.send(result);
-                                                });
-                                            }
-                                        }
-
-                                        glib::ControlFlow::Continue
-                                    },
-                                );
-                            }
-                            Err(e) => eprintln!("[audio] start: {e}"),
-                        }
-                    } else {
-                        eprintln!("[audio] no input device — open Settings to configure one");
-                    }
+                if *recording.borrow() {
+                    stop_recording(
+                        Rc::clone(&recorder),
+                        Rc::clone(&recording),
+                        Rc::clone(&panel),
+                        tray_handle.clone(),
+                        config.borrow().clone(),
+                        Rc::clone(&history),
+                        port,
+                    );
+                } else if let Some(ref dev) = input_device {
+                    start_recording(
+                        dev,
+                        Rc::clone(&recorder),
+                        Rc::clone(&recording),
+                        Rc::clone(&panel),
+                        tray_handle.clone(),
+                        port,
+                    );
                 } else {
-                    *recording.borrow_mut() = false;
-                    panel.show_processing();
-                    if let Some(ref h) = tray_handle {
-                        tray::set_recording(h, false);
-                    }
-
-                    if let Some(rec) = recorder.borrow_mut().take() {
-                        let sample_rate = rec.sample_rate;
-                        let channels = rec.channels;
-                        let samples = rec.stop_and_take();
-                        let duration_s = samples.len() as f32 / (sample_rate as f32 * channels as f32);
-                        eprintln!("[audio] stopped — {} samples, {:.2}s, {}Hz {}ch",
-                            samples.len(), duration_s, sample_rate, channels);
-                        let mono = audio::to_mono(&samples, channels);
-                        let wav = audio::to_wav_bytes(&mono, sample_rate, 1);
-                        eprintln!("[audio] WAV size: {} bytes", wav.len());
-                        let cfg = config.borrow().clone();
-                        let client = WhisperClient::new(port);
-                        let (seg_tx, seg_rx) = bounded::<Result<String, String>>(32);
-
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Runtime::new().unwrap();
-                            let result = rt.block_on(client.transcribe(&wav, |seg| {
-                                eprintln!("[whisper] segment: {seg:?}");
-                                let _ = seg_tx.send(Ok(seg));
-                            }));
-                            if let Err(e) = result {
-                                eprintln!("[whisper] error: {e:?}");
-                                let _ = seg_tx.send(Err(e));
-                            }
-                        });
-
-                        let panel2 = Rc::clone(&panel);
-                        let history2 = Rc::clone(&history);
-                        let full_text = Rc::new(RefCell::new(String::new()));
-                        let first_seg = Rc::new(RefCell::new(true));
-
-                        glib::timeout_add_local(
-                            std::time::Duration::from_millis(50),
-                            move || {
-                                loop {
-                                    match seg_rx.try_recv() {
-                                        Ok(Ok(seg)) => {
-                                            if *first_seg.borrow() {
-                                                *first_seg.borrow_mut() = false;
-                                                panel2.set_transcript(&seg);
-                                                *full_text.borrow_mut() = seg;
-                                            } else {
-                                                panel2.append_segment(&seg);
-                                                let to_push = crate::space_join(&full_text.borrow(), &seg);
-                                                full_text.borrow_mut().push_str(&to_push);
-                                            }
-                                        }
-                                        Ok(Err(e)) => {
-                                            eprintln!("[whisper] {e}");
-                                            panel2.finish("", &cfg, &mut history2.borrow_mut());
-                                            return glib::ControlFlow::Break;
-                                        }
-                                        Err(crossbeam_channel::TryRecvError::Empty) => {
-                                            return glib::ControlFlow::Continue;
-                                        }
-                                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                                            let text = panel2.text_view_text();
-                                            panel2.finish(&text, &cfg, &mut history2.borrow_mut());
-                                            return glib::ControlFlow::Break;
-                                        }
-                                    }
-                                }
-                            },
-                        );
-                    }
+                    eprintln!("[audio] no input device — open Settings to configure one");
                 }
             }
 
-            // process tray commands
             while let Ok(cmd) = tray_rx.try_recv() {
                 match cmd {
                     TrayCommand::OpenSettings => {
@@ -361,13 +169,193 @@ fn build_ui(app: &Application) {
     });
 }
 
-fn space_join(existing: &str, seg: &str) -> String {
-    if !existing.is_empty() && !existing.ends_with(' ') && !seg.starts_with(' ') {
-        format!(" {seg}")
-    } else {
-        seg.to_string()
+// ── recording state machine ───────────────────────────────────────────────
+
+fn start_recording(
+    dev: &cpal::Device,
+    recorder: Rc<RefCell<Option<audio::Recorder>>>,
+    recording: Rc<RefCell<bool>>,
+    panel: Rc<DictationPanel>,
+    tray_handle: Option<ksni::blocking::Handle<tray::VoooxTray>>,
+    port: u16,
+) {
+    match audio::Recorder::start(dev) {
+        Ok(rec) => {
+            eprintln!("[audio] recording started — {}Hz, {}ch", rec.sample_rate, rec.channels);
+            *recorder.borrow_mut() = Some(rec);
+            *recording.borrow_mut() = true;
+            panel.show_recording(dev);
+            if let Some(ref h) = tray_handle {
+                tray::set_recording(h, true);
+            }
+            spawn_streaming_timer(Rc::clone(&recorder), Rc::clone(&recording), Rc::clone(&panel), port);
+        }
+        Err(e) => eprintln!("[audio] start: {e}"),
     }
 }
+
+fn stop_recording(
+    recorder: Rc<RefCell<Option<audio::Recorder>>>,
+    recording: Rc<RefCell<bool>>,
+    panel: Rc<DictationPanel>,
+    tray_handle: Option<ksni::blocking::Handle<tray::VoooxTray>>,
+    cfg: Config,
+    history: Rc<RefCell<History>>,
+    port: u16,
+) {
+    *recording.borrow_mut() = false;
+    panel.show_processing();
+    if let Some(ref h) = tray_handle {
+        tray::set_recording(h, false);
+    }
+
+    if let Some(rec) = recorder.borrow_mut().take() {
+        let sample_rate = rec.sample_rate;
+        let channels = rec.channels;
+        let samples = rec.stop_and_take();
+        let duration_s = samples.len() as f32 / (sample_rate as f32 * channels as f32);
+        eprintln!(
+            "[audio] stopped — {} samples, {:.2}s, {}Hz {}ch",
+            samples.len(), duration_s, sample_rate, channels
+        );
+        let mono = audio::to_mono(&samples, channels);
+        let wav = audio::to_wav_bytes(&mono, sample_rate, 1);
+        eprintln!("[audio] WAV size: {} bytes", wav.len());
+
+        let client = WhisperClient::new(port);
+        let (seg_tx, seg_rx) = bounded::<Result<String, String>>(32);
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(client.transcribe(&wav, |seg| {
+                eprintln!("[whisper] segment: {seg:?}");
+                let _ = seg_tx.send(Ok(seg));
+            }));
+            if let Err(e) = result {
+                eprintln!("[whisper] error: {e:?}");
+                let _ = seg_tx.send(Err(e));
+            }
+        });
+
+        spawn_segment_poll(seg_rx, panel, cfg, history);
+    }
+}
+
+// ── timer helpers ─────────────────────────────────────────────────────────
+
+/// Spawns a 200ms timer that sends partial audio to Whisper during recording
+/// and updates the panel with a live preview.
+fn spawn_streaming_timer(
+    recorder: Rc<RefCell<Option<audio::Recorder>>>,
+    recording: Rc<RefCell<bool>>,
+    panel: Rc<DictationPanel>,
+    port: u16,
+) {
+    let stream_rx: Rc<RefCell<Option<StreamRx>>> = Rc::new(RefCell::new(None));
+    let stream_last_len: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
+
+    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        if !*recording.borrow() {
+            return glib::ControlFlow::Break;
+        }
+
+        // collect result from any in-flight transcription call
+        let got: Option<String> = {
+            let mut rx_opt = stream_rx.borrow_mut();
+            if let Some(ref rx) = *rx_opt {
+                use crossbeam_channel::TryRecvError;
+                match rx.try_recv() {
+                    Ok(r) => { *rx_opt = None; r }
+                    Err(TryRecvError::Disconnected) => { *rx_opt = None; None }
+                    Err(TryRecvError::Empty) => None,
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(text) = got {
+            if *recording.borrow() {
+                panel.set_transcript(&text);
+            }
+        }
+
+        // start a new transcription call if enough new audio has accumulated
+        if stream_rx.borrow().is_none() {
+            let maybe_wav = {
+                let rec_opt = recorder.borrow();
+                rec_opt.as_ref().and_then(|rec| {
+                    let count = rec.sample_count();
+                    let min_new = (rec.sample_rate as usize) * (rec.channels as usize) * 3;
+                    if count >= *stream_last_len.borrow() + min_new {
+                        let (s, sr, ch) = rec.peek_samples();
+                        Some((s, sr, ch))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some((samples, sr, ch)) = maybe_wav {
+                *stream_last_len.borrow_mut() = samples.len();
+                let mono = audio::to_mono(&samples, ch);
+                let wav = audio::to_wav_bytes(&mono, sr, 1);
+                let (tx, rx) = bounded::<Option<String>>(1);
+                *stream_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let client = WhisperClient::new(port);
+                    let result = rt.block_on(client.transcribe(&wav, |_| {})).ok();
+                    let _ = tx.send(result);
+                });
+            }
+        }
+
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Spawns a 50ms timer that polls Whisper segments and streams them into the panel.
+fn spawn_segment_poll(
+    seg_rx: crossbeam_channel::Receiver<Result<String, String>>,
+    panel: Rc<DictationPanel>,
+    cfg: Config,
+    history: Rc<RefCell<History>>,
+) {
+    let full_text = Rc::new(RefCell::new(String::new()));
+    let first_seg = Rc::new(RefCell::new(true));
+
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        loop {
+            match seg_rx.try_recv() {
+                Ok(Ok(seg)) => {
+                    if *first_seg.borrow() {
+                        *first_seg.borrow_mut() = false;
+                        panel.set_transcript(&seg);
+                        *full_text.borrow_mut() = seg;
+                    } else {
+                        panel.append_segment(&seg);
+                        let to_push = dictation_panel::space_join(&full_text.borrow(), &seg);
+                        full_text.borrow_mut().push_str(&to_push);
+                    }
+                }
+                Ok(Err(e)) => {
+                    eprintln!("[whisper] {e}");
+                    panel.finish("", &cfg, &mut history.borrow_mut());
+                    return glib::ControlFlow::Break;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    return glib::ControlFlow::Continue;
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    let text = panel.text_view_text();
+                    panel.finish(&text, &cfg, &mut history.borrow_mut());
+                    return glib::ControlFlow::Break;
+                }
+            }
+        }
+    });
+}
+
+// ── utilities ─────────────────────────────────────────────────────────────
 
 fn show_error_dialog(app: &Application, msg: &str) {
     let win = ApplicationWindow::builder()
