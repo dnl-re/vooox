@@ -110,8 +110,9 @@ impl DictationPanel {
         history_list.set_selection_mode(gtk4::SelectionMode::None);
 
         let history_scroll = ScrolledWindow::builder()
-            .vexpand(true)
+            .vexpand(false)
             .min_content_height(120)
+            .max_content_height(120)
             .build();
         history_scroll.set_child(Some(&history_list));
 
@@ -146,20 +147,7 @@ impl DictationPanel {
             glib::Propagation::Stop
         });
 
-        // shrink window when history is collapsed
-        {
-            let win = window.clone();
-            history_expander.connect_notify_local(Some("expanded"), move |exp, _| {
-                if !exp.is_expanded() {
-                    // toggling resizable forces GTK to recalculate the minimum window size
-                    win.set_resizable(false);
-                    let w = win.clone();
-                    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-                        w.set_resizable(true);
-                    });
-                }
-            });
-        }
+
 
         // ── button handlers ───────────────────────────────────────────────
         {
