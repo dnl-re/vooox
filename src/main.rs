@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod dictation_panel;
 mod history;
+mod history_window;
 mod settings;
 mod shortcuts;
 mod sidecar;
@@ -94,11 +95,36 @@ fn build_ui(app: &Application) {
         Err(e) => eprintln!("[shortcuts] invalid shortcut '{shortcut_str}': {e}"),
     }
 
-    let tray_handle = tray::spawn_tray(tray_tx);
+    let tray_handle = tray::spawn_tray(tray_tx.clone(), config.borrow().panel_mode);
 
     let history = Rc::new(RefCell::new(History::load()));
-    let panel = Rc::new(DictationPanel::new(app));
-    panel.load_history(Rc::clone(&history));
+    let panel = Rc::new(DictationPanel::new(app, tray_tx.clone(), Rc::clone(&config)));
+
+    // Push saved model/language to sidecar once it's ready, so the persisted
+    // selection from a previous run is actually applied.
+    {
+        let model = config.borrow().model.clone();
+        let language = config.borrow().language.clone();
+        let start = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                match whisper_client::wait_for_ready(port, 60).await {
+                    Ok(_) => {
+                        let client = WhisperClient::new(port);
+                        if let Err(e) = client.set_config(&model, &language).await {
+                            eprintln!("[whisper] initial set_config: {e}");
+                        }
+                        eprintln!(
+                            "[main] vooox ready — model={model} language={language} port={port} startup={:.1}s",
+                            start.elapsed().as_secs_f32()
+                        );
+                    }
+                    Err(e) => eprintln!("[main] sidecar not ready: {e}"),
+                }
+            });
+        });
+    }
 
     let recording = Rc::new(RefCell::new(false));
     let recorder: Rc<RefCell<Option<audio::Recorder>>> = Rc::new(RefCell::new(None));
@@ -152,6 +178,46 @@ fn build_ui(app: &Application) {
                     }
                     TrayCommand::ShowPanel => {
                         panel.present();
+                    }
+                    TrayCommand::OpenHistory => {
+                        history_window::open(&app_clone, Rc::clone(&history));
+                    }
+                    TrayCommand::HidePanel => {
+                        panel.hide();
+                    }
+                    TrayCommand::SetPanelMode(m) => {
+                        {
+                            let mut cfg = config.borrow_mut();
+                            if cfg.panel_mode != m {
+                                cfg.panel_mode = m;
+                                if let Err(e) = cfg.save() {
+                                    eprintln!("[config] save: {e}");
+                                }
+                            }
+                        }
+                        panel.apply_mode(m);
+                        if let Some(ref h) = tray_handle {
+                            tray::set_panel_mode(h, m);
+                        }
+                    }
+                    TrayCommand::SetModel(m) => {
+                        {
+                            let mut cfg = config.borrow_mut();
+                            cfg.model = m.clone();
+                            if let Err(e) = cfg.save() {
+                                eprintln!("[config] save: {e}");
+                            }
+                        }
+                        let language = config.borrow().language.clone();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new().unwrap();
+                            rt.block_on(async move {
+                                let client = WhisperClient::new(port);
+                                if let Err(e) = client.set_config(&m, &language).await {
+                                    eprintln!("[whisper] set_config: {e}");
+                                }
+                            });
+                        });
                     }
                     TrayCommand::Quit => app_clone.quit(),
                 }

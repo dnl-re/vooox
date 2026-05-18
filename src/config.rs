@@ -11,6 +11,8 @@ pub struct Config {
     pub language: String,
     pub autostart: bool,
     pub overlay_position: OverlayPosition,
+    #[serde(default)]
+    pub panel_mode: PanelMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +24,36 @@ pub enum OverlayPosition {
     TopLeft,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanelMode {
+    Window,
+    Icon,
+}
+
+impl Default for PanelMode {
+    fn default() -> Self {
+        PanelMode::Window
+    }
+}
+
+impl PanelMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PanelMode::Window => "window",
+            PanelMode::Icon => "icon",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "window" => Some(PanelMode::Window),
+            "icon" => Some(PanelMode::Icon),
+            _ => None,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -31,6 +63,7 @@ impl Default for Config {
             language: "de".into(),
             autostart: false,
             overlay_position: OverlayPosition::BottomRight,
+            panel_mode: PanelMode::Window,
         }
     }
 }

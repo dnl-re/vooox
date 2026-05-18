@@ -1,16 +1,27 @@
+use crate::config::PanelMode;
 use crossbeam_channel::Sender;
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::{menu, MenuItem, Tray};
 
+#[derive(Clone)]
 pub enum TrayCommand {
     OpenSettings,
     ShowPanel,
+    OpenHistory,
+    HidePanel,
+    SetModel(String),
+    SetPanelMode(PanelMode),
     Quit,
 }
+
+pub const WHISPER_MODELS: &[&str] = &[
+    "tiny", "base", "small", "medium", "large-v2", "large-v3",
+];
 
 pub(crate) struct VoooxTray {
     tx: Sender<TrayCommand>,
     recording: bool,
+    panel_mode: PanelMode,
 }
 
 impl Tray for VoooxTray {
@@ -31,6 +42,7 @@ impl Tray for VoooxTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let mode = self.panel_mode;
         vec![
             MenuItem::Standard(menu::StandardItem {
                 label: "Einstellungen".into(),
@@ -46,6 +58,28 @@ impl Tray for VoooxTray {
                 }),
                 ..Default::default()
             }),
+            MenuItem::SubMenu(menu::SubMenu {
+                label: "Modus".into(),
+                submenu: vec![
+                    MenuItem::Checkmark(menu::CheckmarkItem {
+                        label: "Diktierfenster".into(),
+                        checked: mode == PanelMode::Window,
+                        activate: Box::new(|t: &mut Self| {
+                            let _ = t.tx.send(TrayCommand::SetPanelMode(PanelMode::Window));
+                        }),
+                        ..Default::default()
+                    }),
+                    MenuItem::Checkmark(menu::CheckmarkItem {
+                        label: "Nur Icon".into(),
+                        checked: mode == PanelMode::Icon,
+                        activate: Box::new(|t: &mut Self| {
+                            let _ = t.tx.send(TrayCommand::SetPanelMode(PanelMode::Icon));
+                        }),
+                        ..Default::default()
+                    }),
+                ],
+                ..Default::default()
+            }),
             MenuItem::Separator,
             MenuItem::Standard(menu::StandardItem {
                 label: "Beenden".into(),
@@ -58,8 +92,8 @@ impl Tray for VoooxTray {
     }
 }
 
-pub fn spawn_tray(tx: Sender<TrayCommand>) -> Option<Handle<VoooxTray>> {
-    let tray = VoooxTray { tx, recording: false };
+pub fn spawn_tray(tx: Sender<TrayCommand>, initial_mode: PanelMode) -> Option<Handle<VoooxTray>> {
+    let tray = VoooxTray { tx, recording: false, panel_mode: initial_mode };
     match tray.spawn() {
         Ok(handle) => Some(handle),
         Err(e) => {
@@ -74,4 +108,8 @@ pub fn spawn_tray(tx: Sender<TrayCommand>) -> Option<Handle<VoooxTray>> {
 
 pub fn set_recording(handle: &Handle<VoooxTray>, recording: bool) {
     handle.update(|t| t.recording = recording);
+}
+
+pub fn set_panel_mode(handle: &Handle<VoooxTray>, mode: PanelMode) {
+    handle.update(|t| t.panel_mode = mode);
 }
