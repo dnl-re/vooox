@@ -14,7 +14,7 @@ mod x11_window;
 use crate::config::Config;
 use crate::dictation_panel::DictationPanel;
 use crate::history::History;
-use crate::tray::TrayCommand;
+use crate::tray::AppCommand;
 use crate::whisper_client::WhisperClient;
 use crossbeam_channel::bounded;
 use glib;
@@ -87,7 +87,7 @@ fn build_ui(app: &Application) {
     };
 
     let (shortcut_tx, shortcut_rx) = bounded::<()>(8);
-    let (tray_tx, tray_rx) = bounded::<TrayCommand>(8);
+    let (tray_tx, tray_rx) = bounded::<AppCommand>(8);
 
     let shortcut_str = config.borrow().shortcut.clone();
     match shortcuts::Shortcut::parse(&shortcut_str) {
@@ -172,20 +172,20 @@ fn build_ui(app: &Application) {
 
             while let Ok(cmd) = tray_rx.try_recv() {
                 match cmd {
-                    TrayCommand::OpenSettings => {
+                    AppCommand::OpenSettings => {
                         settings::SettingsWindow::new(&app_clone, Rc::clone(&config), port)
                             .show();
                     }
-                    TrayCommand::ShowPanel => {
+                    AppCommand::ShowPanel => {
                         panel.present();
                     }
-                    TrayCommand::OpenHistory => {
+                    AppCommand::OpenHistory => {
                         history_window::open(&app_clone, Rc::clone(&history));
                     }
-                    TrayCommand::HidePanel => {
+                    AppCommand::HidePanel => {
                         panel.hide();
                     }
-                    TrayCommand::SetPanelMode(m) => {
+                    AppCommand::SetPanelMode(m) => {
                         {
                             let mut cfg = config.borrow_mut();
                             if cfg.panel_mode != m {
@@ -200,7 +200,7 @@ fn build_ui(app: &Application) {
                             tray::set_panel_mode(h, m);
                         }
                     }
-                    TrayCommand::SetModel(m) => {
+                    AppCommand::SetModel(m) => {
                         {
                             let mut cfg = config.borrow_mut();
                             cfg.model = m.clone();
@@ -219,7 +219,7 @@ fn build_ui(app: &Application) {
                             });
                         });
                     }
-                    TrayCommand::Quit => app_clone.quit(),
+                    AppCommand::Quit => app_clone.quit(),
                 }
             }
 

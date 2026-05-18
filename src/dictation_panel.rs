@@ -1,7 +1,7 @@
 use crate::audio;
 use crate::config::{Config, PanelMode};
 use crate::history::{History, HistoryEntry};
-use crate::tray::{TrayCommand, WHISPER_MODELS};
+use crate::tray::{AppCommand, WHISPER_MODELS};
 use crate::window_state::{monitor_key, WindowState};
 use crate::x11_window;
 use crossbeam_channel::Sender;
@@ -103,7 +103,7 @@ pub struct DictationPanel {
 impl DictationPanel {
     pub fn new(
         app: &Application,
-        cmd_tx: Sender<TrayCommand>,
+        cmd_tx: Sender<AppCommand>,
         config: Rc<RefCell<Config>>,
     ) -> Self {
         install_css();
@@ -851,22 +851,22 @@ fn set_initial_layout_visibility(mode: PanelMode, window_layout: &GtkBox, pill_l
 
 // ─── action wiring ──────────────────────────────────────────────────────────
 
-/// Wires the kebab-menu's `panel.*` actions to outgoing TrayCommands.
+/// Wires the kebab-menu's `panel.*` actions to outgoing AppCommands.
 /// Returns the stateful mode-action so the panel can keep its radio state
 /// in sync when the mode is changed via the tray instead of the kebab.
 fn wire_kebab_actions(
     window: &ApplicationWindow,
-    cmd_tx: &Sender<TrayCommand>,
+    cmd_tx: &Sender<AppCommand>,
     config: &Rc<RefCell<Config>>,
     initial_mode: PanelMode,
 ) -> gio::SimpleAction {
     let action_group = gio::SimpleActionGroup::new();
 
     for (name, cmd) in [
-        ("history", TrayCommand::OpenHistory),
-        ("settings", TrayCommand::OpenSettings),
-        ("close", TrayCommand::HidePanel),
-        ("quit", TrayCommand::Quit),
+        ("history", AppCommand::OpenHistory),
+        ("settings", AppCommand::OpenSettings),
+        ("close", AppCommand::HidePanel),
+        ("quit", AppCommand::Quit),
     ] {
         let action = gio::SimpleAction::new(name, None);
         let tx = cmd_tx.clone();
@@ -884,7 +884,7 @@ fn wire_kebab_actions(
     model_action.connect_activate(move |action, param| {
         if let Some(s) = param.and_then(|p| p.get::<String>()) {
             action.set_state(&s.to_variant());
-            let _ = tx.send(TrayCommand::SetModel(s));
+            let _ = tx.send(AppCommand::SetModel(s));
         }
     });
     action_group.add_action(&model_action);
@@ -899,7 +899,7 @@ fn wire_kebab_actions(
         if let Some(s) = param.and_then(|p| p.get::<String>()) {
             if let Some(m) = PanelMode::from_str(&s) {
                 action.set_state(&s.to_variant());
-                let _ = tx.send(TrayCommand::SetPanelMode(m));
+                let _ = tx.send(AppCommand::SetPanelMode(m));
             }
         }
     });

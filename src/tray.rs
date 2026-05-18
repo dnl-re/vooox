@@ -4,7 +4,7 @@ use ksni::blocking::{Handle, TrayMethods};
 use ksni::{menu, MenuItem, Tray};
 
 #[derive(Clone)]
-pub enum TrayCommand {
+pub enum AppCommand {
     OpenSettings,
     ShowPanel,
     OpenHistory,
@@ -19,7 +19,7 @@ pub const WHISPER_MODELS: &[&str] = &[
 ];
 
 pub(crate) struct VoooxTray {
-    tx: Sender<TrayCommand>,
+    tx: Sender<AppCommand>,
     recording: bool,
     panel_mode: PanelMode,
 }
@@ -47,14 +47,14 @@ impl Tray for VoooxTray {
             MenuItem::Standard(menu::StandardItem {
                 label: "Einstellungen".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let _ = t.tx.send(TrayCommand::OpenSettings);
+                    let _ = t.tx.send(AppCommand::OpenSettings);
                 }),
                 ..Default::default()
             }),
             MenuItem::Standard(menu::StandardItem {
                 label: "Diktierfenster".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let _ = t.tx.send(TrayCommand::ShowPanel);
+                    let _ = t.tx.send(AppCommand::ShowPanel);
                 }),
                 ..Default::default()
             }),
@@ -65,7 +65,7 @@ impl Tray for VoooxTray {
                         label: "Diktierfenster".into(),
                         checked: mode == PanelMode::Window,
                         activate: Box::new(|t: &mut Self| {
-                            let _ = t.tx.send(TrayCommand::SetPanelMode(PanelMode::Window));
+                            let _ = t.tx.send(AppCommand::SetPanelMode(PanelMode::Window));
                         }),
                         ..Default::default()
                     }),
@@ -73,7 +73,7 @@ impl Tray for VoooxTray {
                         label: "Nur Icon".into(),
                         checked: mode == PanelMode::Icon,
                         activate: Box::new(|t: &mut Self| {
-                            let _ = t.tx.send(TrayCommand::SetPanelMode(PanelMode::Icon));
+                            let _ = t.tx.send(AppCommand::SetPanelMode(PanelMode::Icon));
                         }),
                         ..Default::default()
                     }),
@@ -84,7 +84,7 @@ impl Tray for VoooxTray {
             MenuItem::Standard(menu::StandardItem {
                 label: "Beenden".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let _ = t.tx.send(TrayCommand::Quit);
+                    let _ = t.tx.send(AppCommand::Quit);
                 }),
                 ..Default::default()
             }),
@@ -92,7 +92,7 @@ impl Tray for VoooxTray {
     }
 }
 
-pub fn spawn_tray(tx: Sender<TrayCommand>, initial_mode: PanelMode) -> Option<Handle<VoooxTray>> {
+pub fn spawn_tray(tx: Sender<AppCommand>, initial_mode: PanelMode) -> Option<Handle<VoooxTray>> {
     let tray = VoooxTray { tx, recording: false, panel_mode: initial_mode };
     match tray.spawn() {
         Ok(handle) => Some(handle),
