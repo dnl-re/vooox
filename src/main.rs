@@ -9,6 +9,7 @@ mod sidecar;
 mod tray;
 mod whisper_client;
 mod window_state;
+mod x11_window;
 
 use crate::config::Config;
 use crate::dictation_panel::DictationPanel;

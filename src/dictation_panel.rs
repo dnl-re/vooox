@@ -3,6 +3,7 @@ use crate::config::{Config, PanelMode};
 use crate::history::{History, HistoryEntry};
 use crate::tray::{TrayCommand, WHISPER_MODELS};
 use crate::window_state::{monitor_key, WindowState};
+use crate::x11_window;
 use crossbeam_channel::Sender;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -584,15 +585,9 @@ impl DictationPanel {
         });
         *self.timer_source.borrow_mut() = Some(id);
 
-        // Capture currently active X11 window so we can restore focus after present.
-        let prev_active: Option<String> = std::process::Command::new("xdotool")
-            .arg("getactivewindow")
-            .output()
-            .ok()
-            .and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() { None } else { Some(s) }
-            });
+        // Remember the previously active window so we can hand keyboard focus
+        // back to it after present() steals it for a moment.
+        let prev_active = x11_window::active_window_id();
 
         let was_hidden = !self.window.is_visible();
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
@@ -604,21 +599,15 @@ impl DictationPanel {
             if was_hidden {
                 position_for_cursor(&win, &state);
             }
-            let our_xid = window_xid(&win);
+            let our_xid = x11_window::window_xid(&win);
             if let Some(xid) = our_xid {
-                let _ = std::process::Command::new("xdotool")
-                    .args(["windowactivate", "--sync", &xid.to_string()])
-                    .status();
+                x11_window::activate_window(xid);
             }
             if let Some(ref xid) = prev_active {
-                let _ = std::process::Command::new("xdotool")
-                    .args(["windowfocus", "--sync", xid])
-                    .status();
+                x11_window::focus_window(xid);
             }
             if let Some(xid) = our_xid {
-                let _ = std::process::Command::new("xdotool")
-                    .args(["windowraise", &xid.to_string()])
-                    .status();
+                x11_window::raise_window(xid);
             }
         });
     }
@@ -862,141 +851,36 @@ fn begin_move_from_gesture(win: &ApplicationWindow, gesture: &gtk4::GestureClick
     }
 }
 
-fn monitor_containing(x: i32, y: i32) -> Option<gtk4::gdk::Monitor> {
-    let display = gtk4::gdk::Display::default()?;
-    let monitors = display.monitors();
-    for i in 0..monitors.n_items() {
-        let obj = monitors.item(i)?;
-        use glib::object::Cast;
-        if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
-            let geo = mon.geometry();
-            let scale = mon.scale_factor().max(1);
-            let px = geo.x() * scale;
-            let py = geo.y() * scale;
-            let pw = geo.width() * scale;
-            let ph = geo.height() * scale;
-            if x >= px && x < px + pw && y >= py && y < py + ph {
-                return Some(mon);
-            }
-        }
-    }
-    None
-}
-
-fn cursor_position() -> Option<(i32, i32)> {
-    let out = std::process::Command::new("xdotool")
-        .args(["getmouselocation", "--shell"])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut x: Option<i32> = None;
-    let mut y: Option<i32> = None;
-    for line in s.lines() {
-        if let Some(v) = line.strip_prefix("X=") { x = v.parse().ok(); }
-        else if let Some(v) = line.strip_prefix("Y=") { y = v.parse().ok(); }
-    }
-    x.zip(y)
-}
-
-fn window_xid(window: &ApplicationWindow) -> Option<u64> {
-    use glib::object::Cast;
-    window.surface().and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok()).map(|x| x.xid())
-}
-
+/// Place the window on the monitor under the cursor: use the user's saved
+/// position for that monitor if we have one, otherwise center-bottom default.
 fn position_for_cursor(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
-    let Some((cx, cy)) = cursor_position() else { return };
-    let Some(mon) = monitor_containing(cx, cy) else { return };
-    let key = monitor_key(&mon);
+    let Some((cx, cy)) = x11_window::cursor_position() else { return };
+    let Some(mon) = x11_window::monitor_containing(cx, cy) else { return };
+    let Some(xid) = x11_window::window_xid(window) else { return };
 
-    if let Some((x, y)) = state.borrow().get(&key) {
-        if let Some(xid) = window_xid(window) {
-            let _ = std::process::Command::new("xdotool")
-                .args(["windowmove", &xid.to_string(), &x.to_string(), &y.to_string()])
-                .status();
-            return;
-        }
+    if let Some((x, y)) = state.borrow().get(&monitor_key(&mon)) {
+        x11_window::move_window(xid, x, y);
+        return;
     }
-    position_center_bottom(window);
+    let (target_x, target_y) = center_bottom_on(&mon, window);
+    x11_window::move_window(xid, target_x, target_y);
 }
 
 fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
-    let Some(xid) = window_xid(window) else { return };
-    let Ok(out) = std::process::Command::new("xdotool")
-        .args(["getwindowgeometry", "--shell", &xid.to_string()])
-        .output()
-    else { return };
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut x: Option<i32> = None;
-    let mut y: Option<i32> = None;
-    let mut w: Option<i32> = None;
-    let mut h: Option<i32> = None;
-    for line in s.lines() {
-        if let Some(v) = line.strip_prefix("X=") { x = v.parse().ok(); }
-        else if let Some(v) = line.strip_prefix("Y=") { y = v.parse().ok(); }
-        else if let Some(v) = line.strip_prefix("WIDTH=") { w = v.parse().ok(); }
-        else if let Some(v) = line.strip_prefix("HEIGHT=") { h = v.parse().ok(); }
-    }
-    let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) else { return };
+    let Some(xid) = x11_window::window_xid(window) else { return };
+    let Some((x, y, w, h)) = x11_window::window_geometry(xid) else { return };
     let center = (x + w / 2, y + h / 2);
-    let Some(mon) = monitor_containing(center.0, center.1) else { return };
+    let Some(mon) = x11_window::monitor_containing(center.0, center.1) else { return };
     let mut st = state.borrow_mut();
     st.set(monitor_key(&mon), (x, y));
     st.save();
 }
 
-fn position_center_bottom(window: &ApplicationWindow) {
-    let cursor_pos: Option<(i32, i32)> = std::process::Command::new("xdotool")
-        .args(["getmouselocation", "--shell"])
-        .output()
-        .ok()
-        .and_then(|out| {
-            let s = String::from_utf8_lossy(&out.stdout);
-            let mut x = None;
-            let mut y = None;
-            for line in s.lines() {
-                if let Some(v) = line.strip_prefix("X=") {
-                    x = v.parse::<i32>().ok();
-                } else if let Some(v) = line.strip_prefix("Y=") {
-                    y = v.parse::<i32>().ok();
-                }
-            }
-            x.zip(y)
-        });
-
-    let (cursor_x, cursor_y) = match cursor_pos {
-        Some(p) => p,
-        None => return,
-    };
-
-    let display = match gtk4::gdk::Display::default() {
-        Some(d) => d,
-        None => return,
-    };
-    let monitors = display.monitors();
-    let mut target: Option<(i32, i32, i32, i32)> = None;
-    for i in 0..monitors.n_items() {
-        if let Some(obj) = monitors.item(i) {
-            use glib::object::Cast;
-            if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
-                let geo = mon.geometry();
-                let scale = mon.scale_factor().max(1) as i32;
-                let px = geo.x() * scale;
-                let py = geo.y() * scale;
-                let pw = geo.width() * scale;
-                let ph = geo.height() * scale;
-                if cursor_x >= px && cursor_x < px + pw && cursor_y >= py && cursor_y < py + ph {
-                    target = Some((px, py, pw, ph));
-                    break;
-                }
-            }
-        }
-    }
-    let (mon_px, mon_py, mon_pw, mon_ph) = match target {
-        Some(t) => t,
-        None => return,
-    };
-
-    let scale = window.scale_factor().max(1) as i32;
+/// Default placement on a given monitor: horizontally centered, near the
+/// bottom edge with a small margin.
+fn center_bottom_on(mon: &gtk4::gdk::Monitor, window: &ApplicationWindow) -> (i32, i32) {
+    let (mon_px, mon_py, mon_pw, mon_ph) = x11_window::monitor_geometry_physical(mon);
+    let scale = window.scale_factor().max(1);
     let (default_w, default_h) = window.default_size();
     let logical_w = if window.width() > 10 { window.width() } else if default_w > 0 { default_w } else { 480 };
     let logical_h = if window.height() > 10 { window.height() } else if default_h > 0 { default_h } else { 520 };
@@ -1004,18 +888,9 @@ fn position_center_bottom(window: &ApplicationWindow) {
     let win_h = logical_h * scale;
     let margin = 40 * scale;
 
-    let target_x = (mon_px + (mon_pw - win_w) / 2).max(mon_px);
-    let target_y = (mon_py + mon_ph - win_h - margin).max(mon_py);
-
-    let xid: Option<u64> = window.surface().and_then(|s| {
-        use glib::object::Cast;
-        s.downcast::<gdk4_x11::X11Surface>().ok().map(|x11| x11.xid())
-    });
-    if let Some(xid) = xid {
-        let _ = std::process::Command::new("xdotool")
-            .args(["windowmove", &xid.to_string(), &target_x.to_string(), &target_y.to_string()])
-            .status();
-    }
+    let x = (mon_px + (mon_pw - win_w) / 2).max(mon_px);
+    let y = (mon_py + mon_ph - win_h - margin).max(mon_py);
+    (x, y)
 }
 
 pub(crate) fn space_join(existing: &str, seg: &str) -> String {
