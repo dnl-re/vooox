@@ -188,13 +188,13 @@ fn build_whisper_tab(config: Rc<RefCell<Config>>) -> GtkBox {
     model_lbl.set_xalign(0.0);
     let model_combo = ComboBoxText::new();
     for m in &["tiny", "base", "small", "medium", "large-v2", "large-v3"] {
-        model_combo.append_text(m);
+        model_combo.append(Some(m), m);
     }
     model_combo.set_active_id(Some(&config.borrow().model));
     {
         let cfg = Rc::clone(&config);
         model_combo.connect_changed(move |cb| {
-            if let Some(m) = cb.active_text() {
+            if let Some(m) = cb.active_id() {
                 cfg.borrow_mut().model = m.to_string();
             }
         });
