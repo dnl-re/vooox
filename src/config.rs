@@ -10,18 +10,8 @@ pub struct Config {
     pub model: String,
     pub language: String,
     pub autostart: bool,
-    pub overlay_position: OverlayPosition,
     #[serde(default)]
     pub panel_mode: PanelMode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverlayPosition {
-    BottomRight,
-    BottomLeft,
-    TopRight,
-    TopLeft,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,7 +52,6 @@ impl Default for Config {
             model: "small".into(),
             language: "de".into(),
             autostart: false,
-            overlay_position: OverlayPosition::BottomRight,
             panel_mode: PanelMode::Window,
         }
     }
@@ -162,7 +151,6 @@ mod tests {
             assert_eq!(loaded.shortcut, cfg.shortcut);
             assert_eq!(loaded.model, cfg.model);
             assert_eq!(loaded.language, cfg.language);
-            assert_eq!(loaded.overlay_position, cfg.overlay_position);
         });
     }
 

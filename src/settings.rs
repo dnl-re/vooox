@@ -1,10 +1,10 @@
 use crate::audio;
-use crate::config::{Config, OverlayPosition};
+use crate::config::Config;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, ComboBoxText, DropDown,
-    Entry, Label, LevelBar, ListBox, ListBoxRow, Notebook, Orientation, ScrolledWindow, StringList,
+    Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, ComboBoxText, Entry,
+    Label, LevelBar, ListBox, ListBoxRow, Notebook, Orientation, ScrolledWindow,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -281,30 +281,6 @@ fn build_general_tab(config: Rc<RefCell<Config>>) -> GtkBox {
         });
     }
 
-    let pos_lbl = Label::new(Some("Overlay-Position:"));
-    pos_lbl.set_xalign(0.0);
-    let positions = StringList::new(&["Unten rechts", "Unten links", "Oben rechts", "Oben links"]);
-    let pos_dd = DropDown::new(Some(positions), gtk4::Expression::NONE);
-    pos_dd.set_selected(match config.borrow().overlay_position {
-        OverlayPosition::BottomRight => 0,
-        OverlayPosition::BottomLeft => 1,
-        OverlayPosition::TopRight => 2,
-        OverlayPosition::TopLeft => 3,
-    });
-    {
-        let cfg = Rc::clone(&config);
-        pos_dd.connect_selected_notify(move |dd| {
-            cfg.borrow_mut().overlay_position = match dd.selected() {
-                0 => OverlayPosition::BottomRight,
-                1 => OverlayPosition::BottomLeft,
-                2 => OverlayPosition::TopRight,
-                _ => OverlayPosition::TopLeft,
-            };
-        });
-    }
-
     vbox.append(&autostart_btn);
-    vbox.append(&pos_lbl);
-    vbox.append(&pos_dd);
     vbox
 }
