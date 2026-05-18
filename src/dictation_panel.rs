@@ -90,7 +90,6 @@ pub struct DictationPanel {
     // shared state
     level_meter: Rc<RefCell<Option<audio::LevelMeter>>>,
     level_history: Rc<RefCell<VecDeque<f32>>>,
-    current_level: Rc<Cell<f32>>,
     timer_source: Rc<RefCell<Option<glib::SourceId>>>,
     timer_seconds: Rc<RefCell<u32>>,
     base_text: Rc<RefCell<String>>,
@@ -163,7 +162,6 @@ impl DictationPanel {
             pill_timer,
             level_meter: Rc::new(RefCell::new(None)),
             level_history,
-            current_level: Rc::new(Cell::new(0.0)),
             timer_source: Rc::new(RefCell::new(None)),
             timer_seconds: Rc::new(RefCell::new(0)),
             base_text: Rc::new(RefCell::new(String::new())),
@@ -250,7 +248,6 @@ impl DictationPanel {
                 *v = 0.0;
             }
         }
-        self.current_level.set(0.0);
         self.pill_timer.set_text("00:00");
 
         // start level meter — drives BOTH the LevelBar (window mode)
@@ -259,38 +256,37 @@ impl DictationPanel {
         match audio::LevelMeter::start(device) {
             Ok(meter) => {
                 *self.level_meter.borrow_mut() = Some(meter);
+
+                // 50 ms: update the window-mode LevelBar.
                 let meter_rc = Rc::clone(&self.level_meter);
                 let bar = self.level_bar.clone();
-                let level_cell = Rc::clone(&self.current_level);
                 glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                    if let Some(ref m) = *meter_rc.borrow() {
-                        let v = m.get();
-                        bar.set_value(v as f64);
-                        level_cell.set(v);
-                        glib::ControlFlow::Continue
-                    } else {
-                        bar.set_value(0.0);
-                        level_cell.set(0.0);
-                        glib::ControlFlow::Break
+                    match meter_rc.borrow().as_ref() {
+                        Some(m) => {
+                            bar.set_value(m.get() as f64);
+                            glib::ControlFlow::Continue
+                        }
+                        None => {
+                            bar.set_value(0.0);
+                            glib::ControlFlow::Break
+                        }
                     }
                 });
 
-                // waveform: shift level history every ~70 ms and redraw
-                let level_cell2 = Rc::clone(&self.current_level);
+                // 70 ms: shift the waveform history and redraw the pill.
+                let meter_rc = Rc::clone(&self.level_meter);
                 let hist = Rc::clone(&self.level_history);
                 let area = self.pill_waveform.clone();
-                let recording_flag = Rc::clone(&self.level_meter);
                 glib::timeout_add_local(std::time::Duration::from_millis(70), move || {
-                    if recording_flag.borrow().is_none() {
+                    let Some(level) = meter_rc.borrow().as_ref().map(|m| m.get()) else {
                         return glib::ControlFlow::Break;
+                    };
+                    let mut h = hist.borrow_mut();
+                    if h.len() == WAVE_BARS {
+                        h.pop_front();
                     }
-                    {
-                        let mut h = hist.borrow_mut();
-                        if h.len() == WAVE_BARS {
-                            h.pop_front();
-                        }
-                        h.push_back(level_cell2.get());
-                    }
+                    h.push_back(level);
+                    drop(h);
                     area.queue_draw();
                     glib::ControlFlow::Continue
                 });
