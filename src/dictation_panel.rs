@@ -106,317 +106,47 @@ impl DictationPanel {
         cmd_tx: Sender<TrayCommand>,
         config: Rc<RefCell<Config>>,
     ) -> Self {
-        let provider = CssProvider::new();
-        provider.load_from_data(CSS);
-        if let Some(display) = gtk4::gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-
+        install_css();
         let initial_mode = config.borrow().panel_mode;
 
-        // ── header ────────────────────────────────────────────────────────
-        let status_label = Label::new(Some("○ Bereit"));
-        status_label.add_css_class("status-idle");
+        // ── widgets ───────────────────────────────────────────────────────
+        let status_label = build_status_label();
+        let timer_label = build_timer_label();
+        let level_bar = build_level_bar();
+        let menu_btn = build_menu_button();
+        let header_box = build_header_box(&status_label, &timer_label, &level_bar, &menu_btn);
 
-        let timer_label = Label::new(Some(""));
-        timer_label.set_hexpand(true);
-        timer_label.set_xalign(1.0);
-
-        let level_bar = LevelBar::new();
-        level_bar.set_min_value(0.0);
-        level_bar.set_max_value(1.0);
-        level_bar.set_size_request(100, -1);
-        level_bar.set_valign(gtk4::Align::Center);
-
-        // ── kebab menu (header) ───────────────────────────────────────────
-        let menu_model = gio::Menu::new();
-        menu_model.append(Some("Verlauf"), Some("panel.history"));
-        menu_model.append(Some("Einstellungen"), Some("panel.settings"));
-
-        let model_section = gio::Menu::new();
-        for m in WHISPER_MODELS {
-            let item = gio::MenuItem::new(Some(m), None);
-            item.set_action_and_target_value(
-                Some("panel.model"),
-                Some(&m.to_variant()),
-            );
-            model_section.append_item(&item);
-        }
-        menu_model.append_section(Some("Modell"), &model_section);
-
-        let mode_section = gio::Menu::new();
-        for (label, value) in [("Diktierfenster", "window"), ("Nur Icon", "icon")] {
-            let item = gio::MenuItem::new(Some(label), None);
-            item.set_action_and_target_value(
-                Some("panel.mode"),
-                Some(&value.to_variant()),
-            );
-            mode_section.append_item(&item);
-        }
-        menu_model.append_section(Some("Modus"), &mode_section);
-
-        let section = gio::Menu::new();
-        section.append(Some("Fenster schließen"), Some("panel.close"));
-        section.append(Some("App beenden"), Some("panel.quit"));
-        menu_model.append_section(None, &section);
-
-        let menu_btn = MenuButton::builder()
-            .icon_name("view-more-symbolic")
-            .menu_model(&menu_model)
-            .valign(gtk4::Align::Center)
-            .build();
-        menu_btn.add_css_class("flat");
-
-        let header_box = GtkBox::new(Orientation::Horizontal, 8);
-        header_box.set_margin_top(8);
-        header_box.set_margin_bottom(8);
-        header_box.set_margin_start(12);
-        header_box.set_margin_end(12);
-        header_box.append(&status_label);
-        header_box.append(&timer_label);
-        header_box.append(&level_bar);
-        header_box.append(&menu_btn);
-
-        // ── transcript text view ──────────────────────────────────────────
-        let text_view = TextView::new();
-        text_view.set_editable(true);
-        text_view.set_wrap_mode(gtk4::WrapMode::WordChar);
-        text_view.set_left_margin(12);
-        text_view.set_right_margin(12);
-        text_view.set_top_margin(8);
-        text_view.set_bottom_margin(8);
-
+        let text_view = build_text_view();
         let text_scroll = ScrolledWindow::builder()
             .vexpand(true)
             .min_content_height(80)
             .build();
         text_scroll.set_child(Some(&text_view));
 
-        // ── toast ─────────────────────────────────────────────────────────
-        let toast_label = Label::new(None);
-        toast_label.add_css_class("toast");
-        toast_label.set_hexpand(true);
-        toast_label.set_xalign(0.5);
-        toast_label.set_margin_top(4);
-        toast_label.set_margin_bottom(4);
+        let toast_label = build_toast_label();
+        let window_layout = build_window_layout(&header_box, &text_scroll, &toast_label);
 
-        // ── window-mode layout ────────────────────────────────────────────
-        let window_layout = GtkBox::new(Orientation::Vertical, 0);
-        window_layout.add_css_class("background");
-        window_layout.add_css_class("panel-root");
-        window_layout.append(&header_box);
-        window_layout.append(&Separator::new(Orientation::Horizontal));
-        window_layout.append(&text_scroll);
-        window_layout.append(&toast_label);
-
-        // ── icon-mode (pill) layout ───────────────────────────────────────
-        let pill_layout = GtkBox::new(Orientation::Horizontal, 10);
-        pill_layout.add_css_class("panel-pill");
-        pill_layout.set_valign(gtk4::Align::Center);
-        pill_layout.set_halign(gtk4::Align::Center);
-
-        let pill_dot = Label::new(Some("●"));
-        pill_dot.add_css_class("pill-dot");
-        pill_dot.set_valign(gtk4::Align::Center);
-
-        // waveform drawing area
         let level_history: Rc<RefCell<VecDeque<f32>>> = Rc::new(RefCell::new(
             std::iter::repeat(0.0).take(WAVE_BARS).collect(),
         ));
         let pill_phase: Rc<Cell<PillPhase>> = Rc::new(Cell::new(PillPhase::Recording));
-        let waveform = DrawingArea::new();
-        waveform.set_content_width(WAVE_W);
-        waveform.set_content_height(WAVE_H);
-        waveform.set_valign(gtk4::Align::Center);
-        {
-            let hist = Rc::clone(&level_history);
-            let phase = Rc::clone(&pill_phase);
-            waveform.set_draw_func(move |_, cr, w, h| {
-                let hist = hist.borrow();
-                let n = hist.len().max(1);
-                let bar_w = (w as f64 / n as f64) * 0.55;
-                let gap = (w as f64 / n as f64) - bar_w;
-                let center_y = h as f64 / 2.0;
-                match phase.get() {
-                    PillPhase::Recording => cr.set_source_rgba(1.0, 0.32, 0.32, 0.95),
-                    PillPhase::Processing => cr.set_source_rgba(1.0, 0.68, 0.18, 0.95),
-                    PillPhase::Done => cr.set_source_rgba(0.15, 0.75, 0.40, 0.95),
-                }
-                for (i, &lvl) in hist.iter().enumerate() {
-                    // Audio levels are logarithmic — sqrt() lifts quiet speech
-                    // into a visible range while still letting peaks ride high.
-                    let l = lvl.clamp(0.0, 1.0) as f64;
-                    let scaled = (l.sqrt() * 2.2).min(1.0);
-                    let bar_h = (scaled * h as f64 * 0.9).max(2.0);
-                    let x = i as f64 * (bar_w + gap) + gap * 0.5;
-                    let y = center_y - bar_h / 2.0;
-                    // rounded rect via simple path
-                    let r = (bar_w / 2.0).min(bar_h / 2.0);
-                    cr.move_to(x + r, y);
-                    cr.line_to(x + bar_w - r, y);
-                    cr.arc(x + bar_w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-                    cr.line_to(x + bar_w, y + bar_h - r);
-                    cr.arc(x + bar_w - r, y + bar_h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-                    cr.line_to(x + r, y + bar_h);
-                    cr.arc(x + r, y + bar_h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-                    cr.line_to(x, y + r);
-                    cr.arc(x + r, y + r, r, std::f64::consts::PI, std::f64::consts::PI * 1.5);
-                    cr.close_path();
-                    let _ = cr.fill();
-                }
-            });
-        }
+        let waveform = build_waveform_area(Rc::clone(&level_history), Rc::clone(&pill_phase));
+        let pill_dot = build_pill_dot();
+        let pill_timer = build_pill_timer();
+        let pill_layout = build_pill_layout(&pill_dot, &waveform, &pill_timer);
 
-        waveform.set_size_request(WAVE_W, WAVE_H);
-
-        let pill_timer = Label::new(Some("00:00"));
-        pill_timer.add_css_class("pill-timer");
-        pill_timer.set_valign(gtk4::Align::Center);
-
-        pill_layout.append(&pill_dot);
-        pill_layout.append(&waveform);
-        pill_layout.append(&pill_timer);
-
-        // ── outer container (holds both layouts) ──────────────────────────
+        // ── window ────────────────────────────────────────────────────────
         let outer = GtkBox::new(Orientation::Vertical, 0);
         outer.append(&window_layout);
         outer.append(&pill_layout);
+        let window = build_window(app, initial_mode, &outer);
+        set_initial_layout_visibility(initial_mode, &window_layout, &pill_layout);
 
-        let window = ApplicationWindow::builder()
-            .application(app)
-            .title("vooox")
-            .default_width(if initial_mode == PanelMode::Icon { PILL_W } else { WIN_W })
-            .default_height(if initial_mode == PanelMode::Icon { PILL_H } else { WIN_H })
-            .decorated(false)
-            .build();
-        window.set_child(Some(&outer));
-
-        // initial visibility based on saved mode
-        match initial_mode {
-            PanelMode::Window => {
-                window_layout.set_visible(true);
-                pill_layout.set_visible(false);
-            }
-            PanelMode::Icon => {
-                window_layout.set_visible(false);
-                pill_layout.set_visible(true);
-            }
-        }
-
-        // ── action group ──────────────────────────────────────────────────
-        let action_group = gio::SimpleActionGroup::new();
-        for (name, cmd) in [
-            ("history", TrayCommand::OpenHistory),
-            ("settings", TrayCommand::OpenSettings),
-            ("close", TrayCommand::HidePanel),
-            ("quit", TrayCommand::Quit),
-        ] {
-            let action = gio::SimpleAction::new(name, None);
-            let tx = cmd_tx.clone();
-            let cmd_clone = cmd.clone();
-            action.connect_activate(move |_, _| {
-                let _ = tx.send(cmd_clone.clone());
-            });
-            action_group.add_action(&action);
-        }
-
-        // stateful radio action for model selection
-        let current_model = config.borrow().model.clone();
-        let model_action = gio::SimpleAction::new_stateful(
-            "model",
-            Some(glib::VariantTy::STRING),
-            &current_model.to_variant(),
-        );
-        {
-            let tx = cmd_tx.clone();
-            model_action.connect_activate(move |action, param| {
-                if let Some(p) = param {
-                    if let Some(s) = p.get::<String>() {
-                        action.set_state(&s.to_variant());
-                        let _ = tx.send(TrayCommand::SetModel(s));
-                    }
-                }
-            });
-        }
-        action_group.add_action(&model_action);
-
-        // stateful radio action for panel mode
-        let mode_action = gio::SimpleAction::new_stateful(
-            "mode",
-            Some(glib::VariantTy::STRING),
-            &initial_mode.as_str().to_variant(),
-        );
-        {
-            let tx = cmd_tx.clone();
-            mode_action.connect_activate(move |action, param| {
-                if let Some(p) = param {
-                    if let Some(s) = p.get::<String>() {
-                        if let Some(m) = PanelMode::from_str(&s) {
-                            action.set_state(&s.to_variant());
-                            let _ = tx.send(TrayCommand::SetPanelMode(m));
-                        }
-                    }
-                }
-            });
-        }
-        action_group.add_action(&mode_action);
-
-        window.insert_action_group("panel", Some(&action_group));
-
+        // ── actions, gestures, lifecycle ──────────────────────────────────
+        let mode_action = wire_kebab_actions(&window, &cmd_tx, &config, initial_mode);
         let win_state = Rc::new(RefCell::new(WindowState::load()));
-
-        // hide instead of destroy when the user closes the window
-        {
-            let state = Rc::clone(&win_state);
-            window.connect_close_request(move |win| {
-                save_window_position(win, &state);
-                win.hide();
-                glib::Propagation::Stop
-            });
-        }
-
-        // drag header to move the undecorated window (window mode)
-        {
-            let win = window.clone();
-            let header = header_box.clone();
-            let menu_btn_for_drag = menu_btn.clone();
-            let drag = gtk4::GestureClick::new();
-            drag.set_button(1);
-            drag.connect_pressed(move |gesture, _n, x, y| {
-                if let Some(picked) = header.pick(x, y, gtk4::PickFlags::DEFAULT) {
-                    let mut w = Some(picked);
-                    while let Some(cur) = w {
-                        if cur.eq(&menu_btn_for_drag) {
-                            return;
-                        }
-                        w = cur.parent();
-                        if let Some(ref p) = w {
-                            if p.eq(&header) {
-                                break;
-                            }
-                        }
-                    }
-                }
-                begin_move_from_gesture(&win, gesture, x, y);
-            });
-            header_box.add_controller(drag);
-        }
-
-        // drag pill body to move the undecorated window (icon mode)
-        {
-            let win = window.clone();
-            let pill = pill_layout.clone();
-            let drag = gtk4::GestureClick::new();
-            drag.set_button(1);
-            drag.connect_pressed(move |gesture, _n, x, y| {
-                begin_move_from_gesture(&win, gesture, x, y);
-            });
-            pill.add_controller(drag);
-        }
+        wire_close_request(&window, Rc::clone(&win_state));
+        wire_drag_gestures(&window, &header_box, &menu_btn, &pill_layout);
 
         DictationPanel {
             window,
@@ -899,4 +629,340 @@ pub(crate) fn space_join(existing: &str, seg: &str) -> String {
     } else {
         seg.to_string()
     }
+}
+
+// ─── widget builders ────────────────────────────────────────────────────────
+
+fn install_css() {
+    let provider = CssProvider::new();
+    provider.load_from_data(CSS);
+    if let Some(display) = gtk4::gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn build_status_label() -> Label {
+    let lbl = Label::new(Some("○ Bereit"));
+    lbl.add_css_class("status-idle");
+    lbl
+}
+
+fn build_timer_label() -> Label {
+    let lbl = Label::new(Some(""));
+    lbl.set_hexpand(true);
+    lbl.set_xalign(1.0);
+    lbl
+}
+
+fn build_level_bar() -> LevelBar {
+    let bar = LevelBar::new();
+    bar.set_min_value(0.0);
+    bar.set_max_value(1.0);
+    bar.set_size_request(100, -1);
+    bar.set_valign(gtk4::Align::Center);
+    bar
+}
+
+fn build_menu_button() -> MenuButton {
+    let menu_model = build_menu_model();
+    let btn = MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .menu_model(&menu_model)
+        .valign(gtk4::Align::Center)
+        .build();
+    btn.add_css_class("flat");
+    btn
+}
+
+fn build_menu_model() -> gio::Menu {
+    let menu = gio::Menu::new();
+    menu.append(Some("Verlauf"), Some("panel.history"));
+    menu.append(Some("Einstellungen"), Some("panel.settings"));
+
+    let models = gio::Menu::new();
+    for m in WHISPER_MODELS {
+        let item = gio::MenuItem::new(Some(m), None);
+        item.set_action_and_target_value(Some("panel.model"), Some(&m.to_variant()));
+        models.append_item(&item);
+    }
+    menu.append_section(Some("Modell"), &models);
+
+    let modes = gio::Menu::new();
+    for (label, value) in [("Diktierfenster", "window"), ("Nur Icon", "icon")] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("panel.mode"), Some(&value.to_variant()));
+        modes.append_item(&item);
+    }
+    menu.append_section(Some("Modus"), &modes);
+
+    let actions = gio::Menu::new();
+    actions.append(Some("Fenster schließen"), Some("panel.close"));
+    actions.append(Some("App beenden"), Some("panel.quit"));
+    menu.append_section(None, &actions);
+
+    menu
+}
+
+fn build_header_box(
+    status: &Label,
+    timer: &Label,
+    level: &LevelBar,
+    menu_btn: &MenuButton,
+) -> GtkBox {
+    let header = GtkBox::new(Orientation::Horizontal, 8);
+    header.set_margin_top(8);
+    header.set_margin_bottom(8);
+    header.set_margin_start(12);
+    header.set_margin_end(12);
+    header.append(status);
+    header.append(timer);
+    header.append(level);
+    header.append(menu_btn);
+    header
+}
+
+fn build_text_view() -> TextView {
+    let tv = TextView::new();
+    tv.set_editable(true);
+    tv.set_wrap_mode(gtk4::WrapMode::WordChar);
+    tv.set_left_margin(12);
+    tv.set_right_margin(12);
+    tv.set_top_margin(8);
+    tv.set_bottom_margin(8);
+    tv
+}
+
+fn build_toast_label() -> Label {
+    let lbl = Label::new(None);
+    lbl.add_css_class("toast");
+    lbl.set_hexpand(true);
+    lbl.set_xalign(0.5);
+    lbl.set_margin_top(4);
+    lbl.set_margin_bottom(4);
+    lbl
+}
+
+fn build_window_layout(header: &GtkBox, scroll: &ScrolledWindow, toast: &Label) -> GtkBox {
+    let layout = GtkBox::new(Orientation::Vertical, 0);
+    layout.add_css_class("background");
+    layout.add_css_class("panel-root");
+    layout.append(header);
+    layout.append(&Separator::new(Orientation::Horizontal));
+    layout.append(scroll);
+    layout.append(toast);
+    layout
+}
+
+fn build_pill_dot() -> Label {
+    let dot = Label::new(Some("●"));
+    dot.add_css_class("pill-dot");
+    dot.set_valign(gtk4::Align::Center);
+    dot
+}
+
+fn build_pill_timer() -> Label {
+    let lbl = Label::new(Some("00:00"));
+    lbl.add_css_class("pill-timer");
+    lbl.set_valign(gtk4::Align::Center);
+    lbl
+}
+
+fn build_pill_layout(dot: &Label, waveform: &DrawingArea, timer: &Label) -> GtkBox {
+    let layout = GtkBox::new(Orientation::Horizontal, 10);
+    layout.add_css_class("panel-pill");
+    layout.set_valign(gtk4::Align::Center);
+    layout.set_halign(gtk4::Align::Center);
+    layout.append(dot);
+    layout.append(waveform);
+    layout.append(timer);
+    layout
+}
+
+fn build_waveform_area(
+    history: Rc<RefCell<VecDeque<f32>>>,
+    phase: Rc<Cell<PillPhase>>,
+) -> DrawingArea {
+    let area = DrawingArea::new();
+    area.set_content_width(WAVE_W);
+    area.set_content_height(WAVE_H);
+    area.set_size_request(WAVE_W, WAVE_H);
+    area.set_valign(gtk4::Align::Center);
+    area.set_draw_func(move |_, cr, w, h| {
+        let hist = history.borrow();
+        let n = hist.len().max(1);
+        let bar_w = (w as f64 / n as f64) * 0.55;
+        let gap = (w as f64 / n as f64) - bar_w;
+        let center_y = h as f64 / 2.0;
+        match phase.get() {
+            PillPhase::Recording => cr.set_source_rgba(1.0, 0.32, 0.32, 0.95),
+            PillPhase::Processing => cr.set_source_rgba(1.0, 0.68, 0.18, 0.95),
+            PillPhase::Done => cr.set_source_rgba(0.15, 0.75, 0.40, 0.95),
+        }
+        for (i, &lvl) in hist.iter().enumerate() {
+            // Audio levels are logarithmic — sqrt() lifts quiet speech into
+            // a visible range while still letting peaks ride high.
+            let l = lvl.clamp(0.0, 1.0) as f64;
+            let scaled = (l.sqrt() * 2.2).min(1.0);
+            let bar_h = (scaled * h as f64 * 0.9).max(2.0);
+            let x = i as f64 * (bar_w + gap) + gap * 0.5;
+            let y = center_y - bar_h / 2.0;
+            let r = (bar_w / 2.0).min(bar_h / 2.0);
+            cr.move_to(x + r, y);
+            cr.line_to(x + bar_w - r, y);
+            cr.arc(x + bar_w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+            cr.line_to(x + bar_w, y + bar_h - r);
+            cr.arc(x + bar_w - r, y + bar_h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+            cr.line_to(x + r, y + bar_h);
+            cr.arc(x + r, y + bar_h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+            cr.line_to(x, y + r);
+            cr.arc(x + r, y + r, r, std::f64::consts::PI, std::f64::consts::PI * 1.5);
+            cr.close_path();
+            let _ = cr.fill();
+        }
+    });
+    area
+}
+
+fn build_window(app: &Application, mode: PanelMode, child: &GtkBox) -> ApplicationWindow {
+    let (w, h) = if mode == PanelMode::Icon { (PILL_W, PILL_H) } else { (WIN_W, WIN_H) };
+    let win = ApplicationWindow::builder()
+        .application(app)
+        .title("vooox")
+        .default_width(w)
+        .default_height(h)
+        .decorated(false)
+        .build();
+    win.set_child(Some(child));
+    win
+}
+
+fn set_initial_layout_visibility(mode: PanelMode, window_layout: &GtkBox, pill_layout: &GtkBox) {
+    let (window_visible, pill_visible) = match mode {
+        PanelMode::Window => (true, false),
+        PanelMode::Icon => (false, true),
+    };
+    window_layout.set_visible(window_visible);
+    pill_layout.set_visible(pill_visible);
+}
+
+// ─── action wiring ──────────────────────────────────────────────────────────
+
+/// Wires the kebab-menu's `panel.*` actions to outgoing TrayCommands.
+/// Returns the stateful mode-action so the panel can keep its radio state
+/// in sync when the mode is changed via the tray instead of the kebab.
+fn wire_kebab_actions(
+    window: &ApplicationWindow,
+    cmd_tx: &Sender<TrayCommand>,
+    config: &Rc<RefCell<Config>>,
+    initial_mode: PanelMode,
+) -> gio::SimpleAction {
+    let action_group = gio::SimpleActionGroup::new();
+
+    for (name, cmd) in [
+        ("history", TrayCommand::OpenHistory),
+        ("settings", TrayCommand::OpenSettings),
+        ("close", TrayCommand::HidePanel),
+        ("quit", TrayCommand::Quit),
+    ] {
+        let action = gio::SimpleAction::new(name, None);
+        let tx = cmd_tx.clone();
+        let cmd_clone = cmd.clone();
+        action.connect_activate(move |_, _| { let _ = tx.send(cmd_clone.clone()); });
+        action_group.add_action(&action);
+    }
+
+    let model_action = gio::SimpleAction::new_stateful(
+        "model",
+        Some(glib::VariantTy::STRING),
+        &config.borrow().model.to_variant(),
+    );
+    let tx = cmd_tx.clone();
+    model_action.connect_activate(move |action, param| {
+        if let Some(s) = param.and_then(|p| p.get::<String>()) {
+            action.set_state(&s.to_variant());
+            let _ = tx.send(TrayCommand::SetModel(s));
+        }
+    });
+    action_group.add_action(&model_action);
+
+    let mode_action = gio::SimpleAction::new_stateful(
+        "mode",
+        Some(glib::VariantTy::STRING),
+        &initial_mode.as_str().to_variant(),
+    );
+    let tx = cmd_tx.clone();
+    mode_action.connect_activate(move |action, param| {
+        if let Some(s) = param.and_then(|p| p.get::<String>()) {
+            if let Some(m) = PanelMode::from_str(&s) {
+                action.set_state(&s.to_variant());
+                let _ = tx.send(TrayCommand::SetPanelMode(m));
+            }
+        }
+    });
+    action_group.add_action(&mode_action);
+
+    window.insert_action_group("panel", Some(&action_group));
+    mode_action
+}
+
+fn wire_close_request(window: &ApplicationWindow, state: Rc<RefCell<WindowState>>) {
+    window.connect_close_request(move |win| {
+        save_window_position(win, &state);
+        win.hide();
+        glib::Propagation::Stop
+    });
+}
+
+/// Attaches drag-to-move gestures: clicking the window-mode header (except
+/// on the kebab button) or anywhere on the pill body begins a window move.
+fn wire_drag_gestures(
+    window: &ApplicationWindow,
+    header_box: &GtkBox,
+    menu_btn: &MenuButton,
+    pill_layout: &GtkBox,
+) {
+    let win = window.clone();
+    let header = header_box.clone();
+    let menu_btn_for_drag = menu_btn.clone();
+    let drag = gtk4::GestureClick::new();
+    drag.set_button(1);
+    drag.connect_pressed(move |gesture, _n, x, y| {
+        if click_landed_on(&header, &menu_btn_for_drag, x, y) {
+            return;
+        }
+        begin_move_from_gesture(&win, gesture, x, y);
+    });
+    header_box.add_controller(drag);
+
+    let win = window.clone();
+    let drag = gtk4::GestureClick::new();
+    drag.set_button(1);
+    drag.connect_pressed(move |gesture, _n, x, y| {
+        begin_move_from_gesture(&win, gesture, x, y);
+    });
+    pill_layout.add_controller(drag);
+}
+
+/// True when a click at (x, y) on `header` lands on `target` or one of its
+/// descendants. Used to keep the header-drag gesture from swallowing clicks
+/// on the kebab menu button.
+fn click_landed_on(header: &GtkBox, target: &MenuButton, x: f64, y: f64) -> bool {
+    let Some(picked) = header.pick(x, y, gtk4::PickFlags::DEFAULT) else { return false };
+    let mut w = Some(picked);
+    while let Some(cur) = w {
+        if cur.eq(target) {
+            return true;
+        }
+        w = cur.parent();
+        if let Some(ref p) = w {
+            if p.eq(header) {
+                return false;
+            }
+        }
+    }
+    false
 }
