@@ -11,7 +11,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{
     gio, Application, ApplicationWindow, Box as GtkBox, CssProvider, DrawingArea, Label, LevelBar,
-    MenuButton, Orientation, ScrolledWindow, Separator, Stack, TextView,
+    MenuButton, Orientation, ScrolledWindow, Separator, TextView,
 };
 
 const CSS: &str = r#"
@@ -61,11 +61,6 @@ window { background: transparent; }
     font-size: 12px;
     font-family: monospace;
 }
-.pill-check {
-    color: #26a269;
-    font-size: 16px;
-    font-weight: bold;
-}
 "#;
 
 const PILL_W: i32 = 150;
@@ -88,7 +83,6 @@ pub struct DictationPanel {
     // icon-mode (pill) children
     pill_layout: GtkBox,
     pill_dot: Label,
-    pill_stack: Stack,
     pill_waveform: DrawingArea,
     pill_phase: Rc<Cell<PillPhase>>,
     pill_timer: Label,
@@ -249,6 +243,7 @@ impl DictationPanel {
                 match phase.get() {
                     PillPhase::Recording => cr.set_source_rgba(1.0, 0.32, 0.32, 0.95),
                     PillPhase::Processing => cr.set_source_rgba(1.0, 0.68, 0.18, 0.95),
+                    PillPhase::Done => cr.set_source_rgba(0.15, 0.75, 0.40, 0.95),
                 }
                 for (i, &lvl) in hist.iter().enumerate() {
                     // Audio levels are logarithmic — sqrt() lifts quiet speech
@@ -275,22 +270,14 @@ impl DictationPanel {
             });
         }
 
-        let pill_check = Label::new(Some("✓"));
-        pill_check.add_css_class("pill-check");
-        pill_check.set_valign(gtk4::Align::Center);
-
-        let pill_stack = Stack::new();
-        pill_stack.add_named(&waveform, Some("wave"));
-        pill_stack.add_named(&pill_check, Some("done"));
-        pill_stack.set_visible_child_name("wave");
-        pill_stack.set_size_request(WAVE_W, WAVE_H);
+        waveform.set_size_request(WAVE_W, WAVE_H);
 
         let pill_timer = Label::new(Some("00:00"));
         pill_timer.add_css_class("pill-timer");
         pill_timer.set_valign(gtk4::Align::Center);
 
         pill_layout.append(&pill_dot);
-        pill_layout.append(&pill_stack);
+        pill_layout.append(&waveform);
         pill_layout.append(&pill_timer);
 
         // ── outer container (holds both layouts) ──────────────────────────
@@ -440,7 +427,6 @@ impl DictationPanel {
             toast_label,
             pill_layout,
             pill_dot,
-            pill_stack,
             pill_waveform: waveform,
             pill_phase,
             pill_timer,
@@ -475,8 +461,6 @@ impl DictationPanel {
                 self.window_layout.set_visible(false);
                 self.pill_layout.set_visible(true);
                 self.window.set_default_size(PILL_W, PILL_H);
-                // ensure pill starts in waveform view
-                self.pill_stack.set_visible_child_name("wave");
                 self.set_pill_dot_state(PillDot::Recording);
                 self.pill_phase.set(PillPhase::Recording);
             }
@@ -526,7 +510,6 @@ impl DictationPanel {
         self.status_label.add_css_class("status-rec");
 
         // icon-mode visuals
-        self.pill_stack.set_visible_child_name("wave");
         self.set_pill_dot_state(PillDot::Recording);
         self.pill_phase.set(PillPhase::Recording);
         // reset waveform history
@@ -650,10 +633,9 @@ impl DictationPanel {
         self.status_label.remove_css_class("status-idle");
         self.status_label.add_css_class("status-proc");
 
-        // icon-mode: keep waveform visible but switch to traveling sine wave.
+        // icon-mode: switch waveform to traveling sine wave in orange.
         self.set_pill_dot_state(PillDot::Processing);
         self.pill_phase.set(PillPhase::Processing);
-        self.pill_stack.set_visible_child_name("wave");
         self.processing_started_at.set(Some(std::time::Instant::now()));
         self.start_processing_animation();
     }
@@ -755,31 +737,23 @@ impl DictationPanel {
             lbl.set_text("");
         });
 
-        // icon-mode: hold processing animation for min duration, then swap
-        // to the green check, then hide.
+        // icon-mode: hold processing animation for min duration, then play
+        // the green-sweep "done" animation, which hides the pill at its end.
         if self.mode.get() == PanelMode::Icon {
-            let stack = self.pill_stack.clone();
             let dot = self.pill_dot.clone();
             let phase = Rc::clone(&self.pill_phase);
             let timer_lbl = self.pill_timer.clone();
+            let hist = Rc::clone(&self.level_history);
+            let area = self.pill_waveform.clone();
             let panel_window = self.window.clone();
             let win_state = Rc::clone(&self.win_state);
             glib::timeout_add_local_once(remaining, move || {
-                // Stops the processing animation timer on next tick.
-                phase.set(PillPhase::Recording);
+                // Stop the processing animation timer.
+                phase.set(PillPhase::Done);
                 dot.remove_css_class("pill-dot-proc");
                 dot.add_css_class("pill-dot-done");
-                stack.set_visible_child_name("done");
                 timer_lbl.set_text("");
-
-                let panel_window2 = panel_window.clone();
-                let win_state2 = win_state.clone();
-                let dot2 = dot.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(1600), move || {
-                    save_window_position(&panel_window2, &win_state2);
-                    panel_window2.hide();
-                    dot2.remove_css_class("pill-dot-done");
-                });
+                start_done_animation(hist, area, phase, dot, panel_window, win_state);
             });
         }
 
@@ -809,10 +783,70 @@ enum PillDot {
     Done,
 }
 
+/// Green "done" sweep across the pill waveform:
+/// a single bright peak travels left→right, leaving a settled trail
+/// behind it, then everything fades to zero and the pill hides.
+fn start_done_animation(
+    hist: Rc<RefCell<VecDeque<f32>>>,
+    area: DrawingArea,
+    phase: Rc<Cell<PillPhase>>,
+    dot: Label,
+    win: ApplicationWindow,
+    win_state: Rc<RefCell<WindowState>>,
+) {
+    let start = std::time::Instant::now();
+    let sweep_dur = 0.55_f32;
+    let fade_dur = 0.45_f32;
+    let total_dur = sweep_dur + fade_dur;
+
+    glib::timeout_add_local(std::time::Duration::from_millis(35), move || {
+        if phase.get() != PillPhase::Done {
+            return glib::ControlFlow::Break;
+        }
+        let t = start.elapsed().as_secs_f32();
+        if t >= total_dur {
+            save_window_position(&win, &win_state);
+            win.hide();
+            dot.remove_css_class("pill-dot-done");
+            phase.set(PillPhase::Recording);
+            area.queue_draw();
+            return glib::ControlFlow::Break;
+        }
+
+        let n = {
+            let h = hist.borrow();
+            h.len().max(1) as f32
+        };
+        let mut h = hist.borrow_mut();
+        for (i, slot) in h.iter_mut().enumerate() {
+            let i_f = i as f32;
+            let v: f32 = if t < sweep_dur {
+                let progress = t / sweep_dur * n;
+                // Triangle pulse around `progress`, width ~1.4 bars.
+                let dist = (progress - i_f).abs();
+                let pulse = (1.0_f32 - dist / 1.4).max(0.0);
+                // Bars already passed by the sweep settle at ~0.45.
+                let settled: f32 = if progress > i_f + 0.4 { 0.45 } else { 0.0 };
+                pulse.max(settled)
+            } else {
+                let fade_t = ((t - sweep_dur) / fade_dur).clamp(0.0, 1.0);
+                0.45 * (1.0 - fade_t)
+            };
+            // draw_func applies sqrt(); pre-square so the on-screen height
+            // tracks `v` linearly.
+            *slot = v * v;
+        }
+        drop(h);
+        area.queue_draw();
+        glib::ControlFlow::Continue
+    });
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum PillPhase {
     Recording,
     Processing,
+    Done,
 }
 
 fn begin_move_from_gesture(win: &ApplicationWindow, gesture: &gtk4::GestureClick, x: f64, y: f64) {
