@@ -22,7 +22,7 @@ const CSS: &str = r#"
 .copy-btn-done { background-color: #26a269; color: white; }
 .history-time  { font-size: 11px; color: #888888; }
 .toast { color: #26a269; font-size: 14px; }
-window { background: transparent; }
+window.dictation-window { background: transparent; }
 .panel-root {
     border-radius: 12px;
     border: 1px solid alpha(currentColor, 0.12);
@@ -832,6 +832,7 @@ fn build_window(app: &Application, mode: PanelMode, child: &GtkBox) -> Applicati
         .default_height(h)
         .decorated(false)
         .build();
+    win.add_css_class("dictation-window");
     win.set_child(Some(child));
     win
 }

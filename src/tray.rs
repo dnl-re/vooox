@@ -58,6 +58,13 @@ impl Tray for VoooxTray {
                 }),
                 ..Default::default()
             }),
+            MenuItem::Standard(menu::StandardItem {
+                label: "Verlauf".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.tx.send(AppCommand::OpenHistory);
+                }),
+                ..Default::default()
+            }),
             MenuItem::SubMenu(menu::SubMenu {
                 label: "Modus".into(),
                 submenu: vec![
