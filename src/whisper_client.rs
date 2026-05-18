@@ -63,15 +63,6 @@ impl WhisperClient {
         recv_msg(&mut ws).await
     }
 
-    pub async fn models(&self) -> Result<Vec<String>, String> {
-        let mut ws = self.connect().await?;
-        send_msg(&mut ws, &ClientMsg::Models).await?;
-        match recv_msg(&mut ws).await? {
-            ServerMsg::Models { list } => Ok(list),
-            other => Err(format!("unexpected: {other:?}")),
-        }
-    }
-
     pub async fn set_config(&self, model: &str, language: &str) -> Result<(), String> {
         let mut ws = self.connect().await?;
         send_msg(

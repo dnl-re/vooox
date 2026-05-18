@@ -131,15 +131,6 @@ impl Config {
         Ok(())
     }
 
-    pub fn autostart_desktop_entry(&self) -> String {
-        let exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("vooox"))
-            .display()
-            .to_string();
-        format!(
-            "[Desktop Entry]\nType=Application\nName=vooox\nExec={exe}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n"
-        )
-    }
 }
 
 #[cfg(test)]
@@ -181,14 +172,6 @@ mod tests {
             let cfg = Config::load();
             assert_eq!(cfg.shortcut, Config::default().shortcut);
         });
-    }
-
-    #[test]
-    fn autostart_desktop_entry_contains_exe() {
-        let cfg = Config::default();
-        let entry = cfg.autostart_desktop_entry();
-        assert!(entry.contains("[Desktop Entry]"));
-        assert!(entry.contains("Type=Application"));
     }
 
     #[test]

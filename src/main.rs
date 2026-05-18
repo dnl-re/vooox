@@ -6,7 +6,6 @@ mod history_window;
 mod settings;
 mod shortcuts;
 mod sidecar;
-mod text_inject;
 mod tray;
 mod whisper_client;
 mod window_state;
