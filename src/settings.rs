@@ -26,6 +26,10 @@ impl SettingsWindow {
 
         let notebook = Notebook::new();
         notebook.append_page(
+            &build_general_tab(Rc::clone(&config)),
+            Some(&Label::new(Some("Allgemein"))),
+        );
+        notebook.append_page(
             &build_microphone_tab(Rc::clone(&config)),
             Some(&Label::new(Some("Mikrofon"))),
         );
@@ -36,10 +40,6 @@ impl SettingsWindow {
         notebook.append_page(
             &build_shortcut_tab(Rc::clone(&config)),
             Some(&Label::new(Some("Tastenkürzel"))),
-        );
-        notebook.append_page(
-            &build_general_tab(Rc::clone(&config)),
-            Some(&Label::new(Some("Allgemein"))),
         );
 
         let save_btn = Button::with_label("Speichern & schließen");
