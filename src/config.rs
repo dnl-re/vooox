@@ -16,6 +16,10 @@ pub struct Config {
     pub push_to_talk_enabled: bool,
     #[serde(default = "default_ptt_threshold_ms")]
     pub push_to_talk_threshold_ms: u32,
+    #[serde(default)]
+    pub auto_paste_toggle: bool,
+    #[serde(default)]
+    pub auto_paste_ptt: bool,
 }
 
 fn default_ptt_enabled() -> bool {
@@ -67,6 +71,8 @@ impl Default for Config {
             panel_mode: PanelMode::Window,
             push_to_talk_enabled: true,
             push_to_talk_threshold_ms: 500,
+            auto_paste_toggle: false,
+            auto_paste_ptt: false,
         }
     }
 }

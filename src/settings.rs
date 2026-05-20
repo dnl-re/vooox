@@ -341,5 +341,44 @@ fn build_general_tab(config: Rc<RefCell<Config>>) -> GtkBox {
     vbox.append(&ptt_desc);
     vbox.append(&threshold_row);
 
+    vbox.append(&Separator::new(Orientation::Horizontal));
+
+    let paste_lbl = Label::new(Some("Automatisches Einfügen"));
+    paste_lbl.set_xalign(0.0);
+    paste_lbl.add_css_class("heading");
+
+    let paste_desc = Label::new(Some(
+        "Nach der Transkription wird der Text per simuliertem Strg+V direkt \
+         im zuvor fokussierten Fenster eingefügt (benötigt xdotool, X11). \
+         Du kannst es pro Aufnahme-Modus separat aktivieren.",
+    ));
+    paste_desc.set_xalign(0.0);
+    paste_desc.set_wrap(true);
+
+    let paste_toggle_btn =
+        CheckButton::with_label("Im Toggle-Modus (kurzer Druck) automatisch einfügen");
+    paste_toggle_btn.set_active(config.borrow().auto_paste_toggle);
+    {
+        let cfg = Rc::clone(&config);
+        paste_toggle_btn.connect_toggled(move |btn| {
+            cfg.borrow_mut().auto_paste_toggle = btn.is_active();
+        });
+    }
+
+    let paste_ptt_btn =
+        CheckButton::with_label("Im Push-to-Talk-Modus automatisch einfügen");
+    paste_ptt_btn.set_active(config.borrow().auto_paste_ptt);
+    {
+        let cfg = Rc::clone(&config);
+        paste_ptt_btn.connect_toggled(move |btn| {
+            cfg.borrow_mut().auto_paste_ptt = btn.is_active();
+        });
+    }
+
+    vbox.append(&paste_lbl);
+    vbox.append(&paste_desc);
+    vbox.append(&paste_toggle_btn);
+    vbox.append(&paste_ptt_btn);
+
     vbox
 }

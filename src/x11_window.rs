@@ -36,6 +36,36 @@ pub fn activate_window(xid: u64) {
         .status();
 }
 
+/// Returns the X11 WM_CLASS for the given window as `"instance class"`
+/// (both fields joined by a space). None on lookup failure. Uses `xprop`
+/// rather than `xdotool getwindowclassname` because the latter is missing
+/// in older xdotool versions.
+pub fn window_class(xid: u64) -> Option<String> {
+    let out = Command::new("xprop")
+        .args(["-id", &xid.to_string(), "WM_CLASS"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    parse_wm_class(&s)
+}
+
+fn parse_wm_class(xprop_line: &str) -> Option<String> {
+    // expected: WM_CLASS(STRING) = "instance", "class"
+    let rhs = xprop_line.split('=').nth(1)?;
+    let parts: Vec<String> = rhs
+        .split('"')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1) // odd indices are inside quotes
+        .map(|(_, s)| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 pub fn focus_window(xid: &str) {
     let _ = Command::new("xdotool")
         .args(["windowfocus", "--sync", xid])
@@ -135,5 +165,23 @@ mod tests {
     fn returns_none_for_partial_kv() {
         assert_eq!(parse_xy_kv("X=10\n"), None);
         assert_eq!(parse_xy_kv(""), None);
+    }
+
+    #[test]
+    fn parses_wm_class_two_fields() {
+        let s = "WM_CLASS(STRING) = \"ghostty\", \"com.mitchellh.ghostty\"\n";
+        assert_eq!(parse_wm_class(s), Some("ghostty com.mitchellh.ghostty".into()));
+    }
+
+    #[test]
+    fn parses_wm_class_one_field() {
+        let s = "WM_CLASS(STRING) = \"Alacritty\"\n";
+        assert_eq!(parse_wm_class(s), Some("Alacritty".into()));
+    }
+
+    #[test]
+    fn parses_wm_class_missing() {
+        assert_eq!(parse_wm_class("WM_CLASS:  not found.\n"), None);
+        assert_eq!(parse_wm_class(""), None);
     }
 }

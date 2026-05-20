@@ -163,6 +163,7 @@ fn build_ui(app: &Application) {
 
                         if *recording.borrow() {
                             // second press = toggle stop
+                            panel.arm_auto_paste(config.borrow().auto_paste_toggle);
                             stop_recording(
                                 Rc::clone(&recorder),
                                 Rc::clone(&recording),
@@ -213,6 +214,7 @@ fn build_ui(app: &Application) {
                         if ptt_active.get() && *recording.borrow() {
                             ptt_active.set(false);
                             panel.set_ptt_active(false);
+                            panel.arm_auto_paste(config.borrow().auto_paste_ptt);
                             stop_recording(
                                 Rc::clone(&recorder),
                                 Rc::clone(&recording),

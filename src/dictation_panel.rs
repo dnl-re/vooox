@@ -101,6 +101,12 @@ pub struct DictationPanel {
     mode: Rc<Cell<PanelMode>>,
     mode_action: gio::SimpleAction,
     processing_started_at: Rc<Cell<Option<std::time::Instant>>>,
+    /// XID of the window that had focus when the current recording started.
+    /// Used to refocus the target window for auto-paste.
+    prev_active_xid: Rc<RefCell<Option<String>>>,
+    /// Set by [`arm_auto_paste`] before stop_recording is called; consumed
+    /// by [`finish`] to decide whether to simulate Ctrl+V.
+    pending_auto_paste: Rc<Cell<bool>>,
 }
 
 impl DictationPanel {
@@ -173,6 +179,8 @@ impl DictationPanel {
             mode: Rc::new(Cell::new(initial_mode)),
             mode_action,
             processing_started_at: Rc::new(Cell::new(None)),
+            prev_active_xid: Rc::new(RefCell::new(None)),
+            pending_auto_paste: Rc::new(Cell::new(false)),
         }
     }
 
@@ -335,8 +343,10 @@ impl DictationPanel {
         *self.timer_source.borrow_mut() = Some(id);
 
         // Remember the previously active window so we can hand keyboard focus
-        // back to it after present() steals it for a moment.
+        // back to it after present() steals it for a moment — and so auto-paste
+        // can target it after the transcription is done.
         let prev_active = x11_window::active_window_id();
+        *self.prev_active_xid.borrow_mut() = prev_active.clone();
 
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
         self.window.present();
@@ -467,11 +477,21 @@ impl DictationPanel {
             display.clipboard().set_text(full_text);
         }
 
-        self.toast_label.set_text("✓ In Zwischenablage kopiert");
+        let auto_paste = self.pending_auto_paste.replace(false);
+        self.toast_label.set_text(if auto_paste {
+            "✓ Eingefügt"
+        } else {
+            "✓ In Zwischenablage kopiert"
+        });
         let lbl = self.toast_label.clone();
         glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
             lbl.set_text("");
         });
+
+        if auto_paste {
+            let target = self.prev_active_xid.borrow().clone();
+            schedule_auto_paste(target, remaining);
+        }
 
         // icon-mode: hold processing animation for min duration, then play
         // the green-sweep "done" animation, which hides the pill at its end.
@@ -500,6 +520,12 @@ impl DictationPanel {
             language: cfg.language.clone(),
         };
         history.borrow_mut().push(entry);
+    }
+
+    /// Arm auto-paste for the next [`finish`] call. Consumed (cleared) by
+    /// finish; harmless to set repeatedly.
+    pub fn arm_auto_paste(&self, on: bool) {
+        self.pending_auto_paste.set(on);
     }
 
     pub fn present(&self) {
@@ -648,6 +674,80 @@ fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowSta
     let mut st = state.borrow_mut();
     st.set(monitor_key(&mon), (x, y));
     st.save();
+}
+
+/// xdotool prints window IDs as decimal; X11 windows IDs sometimes appear as
+/// hex elsewhere, so try both before giving up.
+fn parse_xid(s: &str) -> Option<u64> {
+    s.parse::<u64>()
+        .ok()
+        .or_else(|| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+}
+
+/// After processing is visibly done, refocus the previously-active window and
+/// simulate Ctrl+V there. Best-effort: silently does nothing if xdotool is
+/// missing or the target window is gone.
+fn schedule_auto_paste(target_xid: Option<String>, after: std::time::Duration) {
+    // Wait until at least the min-processing window has elapsed so the user
+    // sees the "Verarbeitung" indicator finish, then add a small focus-handoff
+    // delay before the paste itself.
+    glib::timeout_add_local_once(after, move || {
+        let key = match target_xid.as_deref().and_then(parse_xid) {
+            Some(xid) => {
+                x11_window::activate_window(xid);
+                paste_key_for(xid)
+            }
+            None => "ctrl+v",
+        };
+        glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+            if let Err(e) = std::process::Command::new("xdotool")
+                .args(["key", key])
+                .spawn()
+            {
+                eprintln!("[auto-paste] xdotool: {e} — install xdotool for auto-paste");
+            }
+        });
+    });
+}
+
+/// Pick the right paste shortcut for the target window: terminals use
+/// Ctrl+Shift+V because their Ctrl+V is bound to the shell's SIGQUIT / line
+/// kill / nothing; everything else gets the standard Ctrl+V.
+fn paste_key_for(xid: u64) -> &'static str {
+    match x11_window::window_class(xid) {
+        Some(c) if is_terminal_class(&c) => "ctrl+shift+v",
+        _ => "ctrl+v",
+    }
+}
+
+fn is_terminal_class(class: &str) -> bool {
+    let lc = class.to_lowercase();
+    [
+        "gnome-terminal",
+        "konsole",
+        "xterm",
+        "alacritty",
+        "kitty",
+        "urxvt",
+        "rxvt",
+        "terminator",
+        "tilix",
+        "foot",
+        "wezterm",
+        "guake",
+        "yakuake",
+        "termite",
+        "xfce4-terminal",
+        "mate-terminal",
+        "lxterminal",
+        "deepin-terminal",
+        "qterminal",
+        "blackbox",
+        "ptyxis",
+        "ghostty",
+    ]
+    .iter()
+    .any(|t| lc.contains(t))
 }
 
 pub(crate) fn space_join(existing: &str, seg: &str) -> String {
