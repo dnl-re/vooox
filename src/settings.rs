@@ -6,11 +6,10 @@ use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, ComboBoxText,
     Entry, Label, LevelBar, ListBox, ListBoxRow, Notebook, Orientation, ScrolledWindow, Separator,
-    SpinButton,
+    SpinButton, ToggleButton,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 pub struct SettingsWindow {
     window: ApplicationWindow,
@@ -31,7 +30,7 @@ impl SettingsWindow {
             Some(&Label::new(Some("Allgemein"))),
         );
         notebook.append_page(
-            &build_microphone_tab(Rc::clone(&config)),
+            &build_microphone_tab(&window, Rc::clone(&config)),
             Some(&Label::new(Some("Mikrofon"))),
         );
         notebook.append_page(
@@ -78,7 +77,7 @@ impl SettingsWindow {
 
 // ── Mikrofon-Tab ──────────────────────────────────────────────────────────
 
-fn build_microphone_tab(config: Rc<RefCell<Config>>) -> GtkBox {
+fn build_microphone_tab(window: &ApplicationWindow, config: Rc<RefCell<Config>>) -> GtkBox {
     let vbox = GtkBox::new(Orientation::Vertical, 6);
     vbox.set_margin_top(12);
     vbox.set_margin_start(12);
@@ -92,10 +91,6 @@ fn build_microphone_tab(config: Rc<RefCell<Config>>) -> GtkBox {
 
     let list = ListBox::new();
     let scroll = ScrolledWindow::builder().vexpand(true).build();
-
-    // shared level store: device_name → level Arc
-    let level_store: Arc<Mutex<Vec<(String, Arc<Mutex<f32>>)>>> =
-        Arc::new(Mutex::new(Vec::new()));
 
     // if nothing configured yet, pre-select "pulse" (PipeWire follows GNOME default)
     let configured = config.borrow().microphone.clone();
@@ -112,6 +107,12 @@ fn build_microphone_tab(config: Rc<RefCell<Config>>) -> GtkBox {
         }
     }
 
+    // Tab-scoped registry of every per-row level meter cell. On window close
+    // we walk this list and set each one to None so the cpal streams stop
+    // even if the user forgot to toggle the test button off.
+    type MeterCell = Rc<RefCell<Option<audio::LevelMeter>>>;
+    let active_meters: Rc<RefCell<Vec<MeterCell>>> = Rc::new(RefCell::new(Vec::new()));
+
     // radio group: first CheckButton is the group leader; others join via set_group
     let mut group_leader: Option<CheckButton> = None;
 
@@ -125,7 +126,6 @@ fn build_microphone_tab(config: Rc<RefCell<Config>>) -> GtkBox {
         hbox.set_margin_end(8);
 
         let check = CheckButton::new();
-        // join the radio group so only one can be active at a time
         if let Some(ref leader) = group_leader {
             check.set_group(Some(leader));
         } else {
@@ -151,30 +151,68 @@ fn build_microphone_tab(config: Rc<RefCell<Config>>) -> GtkBox {
         level_bar.set_max_value(1.0);
         level_bar.set_size_request(120, -1);
 
-        if let Some(device) = audio::find_device_by_name(&name) {
-            if let Ok(meter) = audio::LevelMeter::start(&device) {
-                let lv = Arc::clone(&meter.level);
-                level_store.lock().unwrap().push((name.clone(), lv));
-                std::mem::forget(meter); // keep alive for settings lifetime
-            }
-        }
+        let test_btn = ToggleButton::with_label("Pegel testen");
+        let meter_cell: MeterCell = Rc::new(RefCell::new(None));
+        active_meters.borrow_mut().push(Rc::clone(&meter_cell));
         {
-            let store = Arc::clone(&level_store);
-            let bar = level_bar.clone();
             let n = name.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                if let Some((_, lv)) = store.lock().unwrap().iter().find(|(nm, _)| nm == &n) {
-                    bar.set_value((*lv.lock().unwrap() as f64 * 8.0).min(1.0));
+            let meter_cell = Rc::clone(&meter_cell);
+            let bar = level_bar.clone();
+            test_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    let Some(device) = audio::find_device_by_name(&n) else {
+                        eprintln!("[settings] device gone: {n}");
+                        btn.set_active(false);
+                        return;
+                    };
+                    match audio::LevelMeter::start(&device) {
+                        Ok(meter) => {
+                            *meter_cell.borrow_mut() = Some(meter);
+                            let mc = Rc::clone(&meter_cell);
+                            let b = bar.clone();
+                            glib::timeout_add_local(
+                                std::time::Duration::from_millis(50),
+                                move || match mc.borrow().as_ref() {
+                                    Some(m) => {
+                                        b.set_value((m.get() as f64 * 8.0).min(1.0));
+                                        glib::ControlFlow::Continue
+                                    }
+                                    None => {
+                                        b.set_value(0.0);
+                                        glib::ControlFlow::Break
+                                    }
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("[settings] level meter {n}: {e}");
+                            btn.set_active(false);
+                        }
+                    }
+                } else {
+                    *meter_cell.borrow_mut() = None;
+                    bar.set_value(0.0);
                 }
-                glib::ControlFlow::Continue
             });
         }
 
         hbox.append(&check);
         hbox.append(&name_lbl);
+        hbox.append(&test_btn);
         hbox.append(&level_bar);
         row.set_child(Some(&hbox));
         list.append(&row);
+    }
+
+    // Stop any still-running level meters when the settings window closes.
+    {
+        let am = Rc::clone(&active_meters);
+        window.connect_close_request(move |_| {
+            for cell in am.borrow().iter() {
+                *cell.borrow_mut() = None;
+            }
+            glib::Propagation::Proceed
+        });
     }
 
     scroll.set_child(Some(&list));
