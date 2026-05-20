@@ -17,6 +17,7 @@ use gtk4::{
 
 const CSS: &str = r#"
 .status-rec  { color: #ff4444; font-weight: bold; }
+.status-ptt  { color: #c93cff; font-weight: bold; }
 .status-proc { color: #ffaa00; font-weight: bold; }
 .status-idle { color: #888888; }
 .copy-btn-done { background-color: #26a269; color: white; }
@@ -46,6 +47,9 @@ window.dictation-window { background: transparent; }
     0%   { opacity: 0.35; }
     50%  { opacity: 1.0;  }
     100% { opacity: 0.35; }
+}
+.pill-dot-ptt {
+    color: #c93cff;
 }
 .pill-dot-proc {
     color: #ffaa00;
@@ -199,10 +203,28 @@ impl DictationPanel {
     fn set_pill_dot_state(&self, state: PillDot) {
         self.pill_dot.remove_css_class("pill-dot-proc");
         self.pill_dot.remove_css_class("pill-dot-done");
+        self.pill_dot.remove_css_class("pill-dot-ptt");
         match state {
             PillDot::Recording => { /* base .pill-dot class only — pulses red */ }
             PillDot::Processing => self.pill_dot.add_css_class("pill-dot-proc"),
             PillDot::Done => self.pill_dot.add_css_class("pill-dot-done"),
+        }
+    }
+
+    /// Switch recording visuals between toggle-mode (red) and push-to-talk
+    /// (purple). Safe to call repeatedly. Only takes effect while in the
+    /// recording phase — processing/done visuals are not touched.
+    pub fn set_ptt_active(&self, active: bool) {
+        if active {
+            self.status_label.set_text("● Push-to-Talk");
+            self.status_label.remove_css_class("status-rec");
+            self.status_label.add_css_class("status-ptt");
+            self.pill_dot.add_css_class("pill-dot-ptt");
+        } else {
+            self.status_label.set_text("● Aufnahme");
+            self.status_label.remove_css_class("status-ptt");
+            self.status_label.add_css_class("status-rec");
+            self.pill_dot.remove_css_class("pill-dot-ptt");
         }
     }
 
@@ -236,6 +258,7 @@ impl DictationPanel {
         self.status_label.set_text("● Aufnahme");
         self.status_label.remove_css_class("status-proc");
         self.status_label.remove_css_class("status-idle");
+        self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-rec");
 
         // icon-mode visuals
@@ -346,6 +369,7 @@ impl DictationPanel {
         self.status_label.set_text("⏳ Verarbeitung…");
         self.status_label.remove_css_class("status-rec");
         self.status_label.remove_css_class("status-idle");
+        self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-proc");
 
         // icon-mode: switch waveform to traveling sine wave in orange.
@@ -413,6 +437,7 @@ impl DictationPanel {
         self.status_label.set_text("○ Bereit");
         self.status_label.remove_css_class("status-proc");
         self.status_label.remove_css_class("status-rec");
+        self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-idle");
         self.timer_label.set_text("");
 

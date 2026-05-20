@@ -20,7 +20,7 @@ use crossbeam_channel::bounded;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 type StreamRx = crossbeam_channel::Receiver<Option<String>>;
@@ -86,7 +86,7 @@ fn build_ui(app: &Application) {
         }
     };
 
-    let (shortcut_tx, shortcut_rx) = bounded::<()>(8);
+    let (shortcut_tx, shortcut_rx) = bounded::<shortcuts::ShortcutEvent>(16);
     let (tray_tx, tray_rx) = bounded::<AppCommand>(8);
 
     let shortcut_str = config.borrow().shortcut.clone();
@@ -128,6 +128,11 @@ fn build_ui(app: &Application) {
 
     let recording = Rc::new(RefCell::new(false));
     let recorder: Rc<RefCell<Option<audio::Recorder>>> = Rc::new(RefCell::new(None));
+    // PTT state: incremented on every Press; the threshold timer captures the
+    // hold-id at scheduling time and only flips the visual if the same hold is
+    // still active when the timer fires.
+    let hold_id: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+    let ptt_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     let device_name = config.borrow().microphone.clone();
     let input_device = device_name
@@ -144,29 +149,82 @@ fn build_ui(app: &Application) {
         let tray_handle = tray_handle.clone();
         let app_clone = app.clone();
 
+        let hold_id = Rc::clone(&hold_id);
+        let ptt_active = Rc::clone(&ptt_active);
+
         glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
-            while let Ok(()) = shortcut_rx.try_recv() {
-                if *recording.borrow() {
-                    stop_recording(
-                        Rc::clone(&recorder),
-                        Rc::clone(&recording),
-                        Rc::clone(&panel),
-                        tray_handle.clone(),
-                        config.borrow().clone(),
-                        Rc::clone(&history),
-                        port,
-                    );
-                } else if let Some(ref dev) = input_device {
-                    start_recording(
-                        dev,
-                        Rc::clone(&recorder),
-                        Rc::clone(&recording),
-                        Rc::clone(&panel),
-                        tray_handle.clone(),
-                        port,
-                    );
-                } else {
-                    eprintln!("[audio] no input device — open Settings to configure one");
+            while let Ok(ev) = shortcut_rx.try_recv() {
+                match ev {
+                    shortcuts::ShortcutEvent::Press => {
+                        // Start a new hold window regardless of toggle/PTT path
+                        let this_hold = hold_id.get().wrapping_add(1);
+                        hold_id.set(this_hold);
+                        ptt_active.set(false);
+
+                        if *recording.borrow() {
+                            // second press = toggle stop
+                            stop_recording(
+                                Rc::clone(&recorder),
+                                Rc::clone(&recording),
+                                Rc::clone(&panel),
+                                tray_handle.clone(),
+                                config.borrow().clone(),
+                                Rc::clone(&history),
+                                port,
+                            );
+                        } else if let Some(ref dev) = input_device {
+                            start_recording(
+                                dev,
+                                Rc::clone(&recorder),
+                                Rc::clone(&recording),
+                                Rc::clone(&panel),
+                                tray_handle.clone(),
+                                port,
+                            );
+                            // Schedule PTT-threshold visual switch if enabled.
+                            let cfg_snap = config.borrow().clone();
+                            if cfg_snap.push_to_talk_enabled {
+                                let threshold = std::time::Duration::from_millis(
+                                    cfg_snap.push_to_talk_threshold_ms as u64,
+                                );
+                                let hold_at_schedule = this_hold;
+                                let hold_id = Rc::clone(&hold_id);
+                                let ptt_active = Rc::clone(&ptt_active);
+                                let recording = Rc::clone(&recording);
+                                let panel = Rc::clone(&panel);
+                                glib::timeout_add_local_once(threshold, move || {
+                                    if hold_id.get() == hold_at_schedule
+                                        && *recording.borrow()
+                                    {
+                                        ptt_active.set(true);
+                                        panel.set_ptt_active(true);
+                                    }
+                                });
+                            }
+                        } else {
+                            eprintln!(
+                                "[audio] no input device — open Settings to configure one"
+                            );
+                        }
+                    }
+                    shortcuts::ShortcutEvent::Release => {
+                        // Invalidate any pending threshold timer for this hold
+                        hold_id.set(hold_id.get().wrapping_add(1));
+                        if ptt_active.get() && *recording.borrow() {
+                            ptt_active.set(false);
+                            panel.set_ptt_active(false);
+                            stop_recording(
+                                Rc::clone(&recorder),
+                                Rc::clone(&recording),
+                                Rc::clone(&panel),
+                                tray_handle.clone(),
+                                config.borrow().clone(),
+                                Rc::clone(&history),
+                                port,
+                            );
+                        }
+                        ptt_active.set(false);
+                    }
                 }
             }
 

@@ -12,6 +12,18 @@ pub struct Config {
     pub autostart: bool,
     #[serde(default)]
     pub panel_mode: PanelMode,
+    #[serde(default = "default_ptt_enabled")]
+    pub push_to_talk_enabled: bool,
+    #[serde(default = "default_ptt_threshold_ms")]
+    pub push_to_talk_threshold_ms: u32,
+}
+
+fn default_ptt_enabled() -> bool {
+    true
+}
+
+fn default_ptt_threshold_ms() -> u32 {
+    500
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +65,8 @@ impl Default for Config {
             language: "de".into(),
             autostart: false,
             panel_mode: PanelMode::Window,
+            push_to_talk_enabled: true,
+            push_to_talk_threshold_ms: 500,
         }
     }
 }

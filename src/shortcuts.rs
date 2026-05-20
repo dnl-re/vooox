@@ -115,20 +115,35 @@ fn key_from_char(c: char) -> Option<Key> {
 
 // ── listener ─────────────────────────────────────────────────────────────
 
-pub fn spawn_listener(shortcut: Shortcut, tx: Sender<()>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutEvent {
+    Press,
+    Release,
+}
+
+pub fn spawn_listener(shortcut: Shortcut, tx: Sender<ShortcutEvent>) {
     std::thread::spawn(move || {
         let mut pressed: HashSet<Key> = HashSet::new();
+        let mut press_sent: bool = false;
 
         let callback = move |event: Event| {
             match event.event_type {
                 EventType::KeyPress(k) => {
+                    // rdev sends KeyPress repeatedly while the key is held —
+                    // only emit Press once per physical hold.
+                    let was_pressed = pressed.contains(&k);
                     pressed.insert(k.clone());
-                    if is_shortcut_active(&shortcut, &pressed, &k) {
-                        let _ = tx.send(());
+                    if !was_pressed && is_shortcut_active(&shortcut, &pressed, &k) {
+                        press_sent = true;
+                        let _ = tx.send(ShortcutEvent::Press);
                     }
                 }
                 EventType::KeyRelease(k) => {
                     pressed.remove(&k);
+                    if press_sent && k == shortcut.key {
+                        press_sent = false;
+                        let _ = tx.send(ShortcutEvent::Release);
+                    }
                 }
                 _ => {}
             }
