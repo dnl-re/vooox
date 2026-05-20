@@ -338,14 +338,14 @@ impl DictationPanel {
         // back to it after present() steals it for a moment.
         let prev_active = x11_window::active_window_id();
 
-        let was_hidden = !self.window.is_visible();
+        let needs_reposition = !self.window.is_visible() || cursor_on_other_monitor(&self.window);
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
         self.window.present();
 
         let win = self.window.clone();
         let state = Rc::clone(&self.win_state);
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-            if was_hidden {
+            if needs_reposition {
                 position_for_cursor(&win, &state);
             }
             let our_xid = x11_window::window_xid(&win);
@@ -600,6 +600,21 @@ fn begin_move_from_gesture(win: &ApplicationWindow, gesture: &gtk4::GestureClick
             }
         }
     }
+}
+
+/// True when the cursor is on a different monitor than the one the window is
+/// currently displayed on. Used to reposition a visible window that the user
+/// has carried to another screen since the last recording.
+fn cursor_on_other_monitor(window: &ApplicationWindow) -> bool {
+    let Some((cx, cy)) = x11_window::cursor_position() else { return false };
+    let Some(cursor_mon) = x11_window::monitor_containing(cx, cy) else { return false };
+    let Some(xid) = x11_window::window_xid(window) else { return false };
+    let Some((x, y, w, h)) = x11_window::window_geometry(xid) else { return false };
+    let center = (x + w / 2, y + h / 2);
+    let Some(win_mon) = x11_window::monitor_containing(center.0, center.1) else {
+        return true;
+    };
+    monitor_key(&cursor_mon) != monitor_key(&win_mon)
 }
 
 /// Place the window on the monitor under the cursor: use the user's saved
