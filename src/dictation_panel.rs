@@ -338,16 +338,12 @@ impl DictationPanel {
         // back to it after present() steals it for a moment.
         let prev_active = x11_window::active_window_id();
 
-        let needs_reposition = !self.window.is_visible() || cursor_on_other_monitor(&self.window);
         gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
         self.window.present();
 
         let win = self.window.clone();
-        let state = Rc::clone(&self.win_state);
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-            if needs_reposition {
-                position_for_cursor(&win, &state);
-            }
+            position_next_to_cursor(&win);
             let our_xid = x11_window::window_xid(&win);
             if let Some(xid) = our_xid {
                 x11_window::activate_window(xid);
@@ -602,34 +598,46 @@ fn begin_move_from_gesture(win: &ApplicationWindow, gesture: &gtk4::GestureClick
     }
 }
 
-/// True when the cursor is on a different monitor than the one the window is
-/// currently displayed on. Used to reposition a visible window that the user
-/// has carried to another screen since the last recording.
-fn cursor_on_other_monitor(window: &ApplicationWindow) -> bool {
-    let Some((cx, cy)) = x11_window::cursor_position() else { return false };
-    let Some(cursor_mon) = x11_window::monitor_containing(cx, cy) else { return false };
-    let Some(xid) = x11_window::window_xid(window) else { return false };
-    let Some((x, y, w, h)) = x11_window::window_geometry(xid) else { return false };
-    let center = (x + w / 2, y + h / 2);
-    let Some(win_mon) = x11_window::monitor_containing(center.0, center.1) else {
-        return true;
-    };
-    monitor_key(&cursor_mon) != monitor_key(&win_mon)
-}
-
-/// Place the window on the monitor under the cursor: use the user's saved
-/// position for that monitor if we have one, otherwise center-bottom default.
-fn position_for_cursor(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
+/// Place the window directly next to the mouse cursor: to the right by
+/// default, flipping to the left if the right side would overflow the
+/// monitor edge. Y is centered on the cursor and clamped into the monitor.
+fn position_next_to_cursor(window: &ApplicationWindow) {
     let Some((cx, cy)) = x11_window::cursor_position() else { return };
     let Some(mon) = x11_window::monitor_containing(cx, cy) else { return };
     let Some(xid) = x11_window::window_xid(window) else { return };
 
-    if let Some((x, y)) = state.borrow().get(&monitor_key(&mon)) {
-        x11_window::move_window(xid, x, y);
-        return;
-    }
-    let (target_x, target_y) = center_bottom_on(&mon, window);
-    x11_window::move_window(xid, target_x, target_y);
+    let (mon_x, mon_y, mon_w, mon_h) = x11_window::monitor_geometry_physical(&mon);
+    let scale = window.scale_factor().max(1);
+    let (default_w, default_h) = window.default_size();
+    let logical_w = if window.width() > 10 {
+        window.width()
+    } else if default_w > 0 {
+        default_w
+    } else {
+        WIN_W
+    };
+    let logical_h = if window.height() > 10 {
+        window.height()
+    } else if default_h > 0 {
+        default_h
+    } else {
+        WIN_H
+    };
+    let win_w = logical_w * scale;
+    let win_h = logical_h * scale;
+    let margin = 16 * scale;
+
+    let right_x = cx + margin;
+    let x = if right_x + win_w <= mon_x + mon_w {
+        right_x
+    } else {
+        (cx - margin - win_w).max(mon_x)
+    };
+    let y = (cy - win_h / 2)
+        .max(mon_y)
+        .min(mon_y + mon_h - win_h);
+
+    x11_window::move_window(xid, x, y);
 }
 
 fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
@@ -640,23 +648,6 @@ fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowSta
     let mut st = state.borrow_mut();
     st.set(monitor_key(&mon), (x, y));
     st.save();
-}
-
-/// Default placement on a given monitor: horizontally centered, near the
-/// bottom edge with a small margin.
-fn center_bottom_on(mon: &gtk4::gdk::Monitor, window: &ApplicationWindow) -> (i32, i32) {
-    let (mon_px, mon_py, mon_pw, mon_ph) = x11_window::monitor_geometry_physical(mon);
-    let scale = window.scale_factor().max(1);
-    let (default_w, default_h) = window.default_size();
-    let logical_w = if window.width() > 10 { window.width() } else if default_w > 0 { default_w } else { 480 };
-    let logical_h = if window.height() > 10 { window.height() } else if default_h > 0 { default_h } else { 520 };
-    let win_w = logical_w * scale;
-    let win_h = logical_h * scale;
-    let margin = 40 * scale;
-
-    let x = (mon_px + (mon_pw - win_w) / 2).max(mon_px);
-    let y = (mon_py + mon_ph - win_h - margin).max(mon_py);
-    (x, y)
 }
 
 pub(crate) fn space_join(existing: &str, seg: &str) -> String {
