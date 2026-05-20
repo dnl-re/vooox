@@ -1,5 +1,6 @@
 use crate::audio;
 use crate::config::Config;
+use crate::x11_window;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
@@ -20,8 +21,8 @@ impl SettingsWindow {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("vooox — Einstellungen")
-            .default_width(600)
-            .default_height(480)
+            .default_width(760)
+            .default_height(620)
             .build();
 
         let notebook = Notebook::new();
@@ -68,6 +69,10 @@ impl SettingsWindow {
 
     pub fn show(&self) {
         self.window.present();
+        let win = self.window.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            x11_window::center_window_on_cursor_monitor(&win);
+        });
     }
 }
 

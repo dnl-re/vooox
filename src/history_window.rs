@@ -1,4 +1,6 @@
 use crate::history::{History, HistoryEntry};
+use crate::x11_window;
+use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation,
@@ -34,6 +36,10 @@ pub fn open(app: &Application, history: Rc<RefCell<History>>) {
         .build();
     window.set_child(Some(&scroll));
     window.present();
+    let w = window.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+        x11_window::center_window_on_cursor_monitor(&w);
+    });
 }
 
 fn make_row(entry: &HistoryEntry, list: &ListBox, history: Rc<RefCell<History>>) -> ListBoxRow {

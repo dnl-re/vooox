@@ -496,4 +496,8 @@ fn show_error_dialog(app: &Application, msg: &str) {
     lbl.set_margin_end(16);
     win.set_child(Some(&lbl));
     win.present();
+    let w = win.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+        x11_window::center_window_on_cursor_monitor(&w);
+    });
 }

@@ -36,6 +36,39 @@ pub fn activate_window(xid: u64) {
         .status();
 }
 
+/// Center the given window on the monitor that currently holds the mouse
+/// cursor. Falls back silently if cursor or monitor lookup fails.
+pub fn center_window_on_cursor_monitor(window: &gtk4::ApplicationWindow) {
+    use gtk4::prelude::*;
+    let Some((cx, cy)) = cursor_position() else { return };
+    let Some(mon) = monitor_containing(cx, cy) else { return };
+    let Some(xid) = window_xid(window) else { return };
+
+    let (mon_x, mon_y, mon_w, mon_h) = monitor_geometry_physical(&mon);
+    let scale = window.scale_factor().max(1);
+    let (default_w, default_h) = window.default_size();
+    let logical_w = if window.width() > 10 {
+        window.width()
+    } else if default_w > 0 {
+        default_w
+    } else {
+        600
+    };
+    let logical_h = if window.height() > 10 {
+        window.height()
+    } else if default_h > 0 {
+        default_h
+    } else {
+        400
+    };
+    let win_w = logical_w * scale;
+    let win_h = logical_h * scale;
+
+    let x = mon_x + (mon_w - win_w) / 2;
+    let y = mon_y + (mon_h - win_h) / 2;
+    move_window(xid, x.max(mon_x), y.max(mon_y));
+}
+
 /// Returns the X11 WM_CLASS for the given window as `"instance class"`
 /// (both fields joined by a space). None on lookup failure. Uses `xprop`
 /// rather than `xdotool getwindowclassname` because the latter is missing
