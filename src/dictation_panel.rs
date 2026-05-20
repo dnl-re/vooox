@@ -228,12 +228,17 @@ impl DictationPanel {
             self.status_label.remove_css_class("status-rec");
             self.status_label.add_css_class("status-ptt");
             self.pill_dot.add_css_class("pill-dot-ptt");
+            self.pill_phase.set(PillPhase::RecordingPtt);
         } else {
             self.status_label.set_text("● Aufnahme");
             self.status_label.remove_css_class("status-ptt");
             self.status_label.add_css_class("status-rec");
             self.pill_dot.remove_css_class("pill-dot-ptt");
+            if self.pill_phase.get() == PillPhase::RecordingPtt {
+                self.pill_phase.set(PillPhase::Recording);
+            }
         }
+        self.pill_waveform.queue_draw();
     }
 
     pub fn show_recording(&self, device: &cpal::Device) {
@@ -607,6 +612,7 @@ fn start_done_animation(
 #[derive(Clone, Copy, PartialEq)]
 enum PillPhase {
     Recording,
+    RecordingPtt,
     Processing,
     Done,
 }
@@ -926,6 +932,7 @@ fn build_waveform_area(
         let center_y = h as f64 / 2.0;
         match phase.get() {
             PillPhase::Recording => cr.set_source_rgba(1.0, 0.32, 0.32, 0.95),
+            PillPhase::RecordingPtt => cr.set_source_rgba(0.788, 0.235, 1.0, 0.95),
             PillPhase::Processing => cr.set_source_rgba(1.0, 0.68, 0.18, 0.95),
             PillPhase::Done => cr.set_source_rgba(0.15, 0.75, 0.40, 0.95),
         }
