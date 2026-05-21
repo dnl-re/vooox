@@ -477,10 +477,6 @@ impl DictationPanel {
             return;
         }
 
-        if let Some(display) = gtk4::gdk::Display::default() {
-            display.clipboard().set_text(full_text);
-        }
-
         let auto_paste = self.pending_auto_paste.replace(false);
         self.toast_label.set_text(if auto_paste {
             "✓ Eingefügt"
@@ -492,9 +488,38 @@ impl DictationPanel {
             lbl.set_text("");
         });
 
-        if auto_paste {
-            let target = self.prev_active_xid.borrow().clone();
-            schedule_auto_paste(target, remaining);
+        if let Some(display) = gtk4::gdk::Display::default() {
+            let clipboard = display.clipboard();
+            if auto_paste {
+                // Save the user's existing clipboard contents, paste the
+                // transcript via Ctrl+V, then restore the original after the
+                // paste has landed — so dictating doesn't clobber whatever
+                // the user had on their clipboard before.
+                //
+                // Only text contents can be preserved this way; if the
+                // clipboard held something else (image, files, etc.) we
+                // fall back to clearing it after paste.
+                let target = self.prev_active_xid.borrow().clone();
+                let full_owned = full_text.to_string();
+                let cb_for_callback = clipboard.clone();
+                clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
+                    let prev: Option<String> = result.ok().flatten().map(|s| s.to_string());
+                    cb_for_callback.set_text(&full_owned);
+                    schedule_auto_paste(target, remaining);
+                    // Wait long enough for the simulated Ctrl+V (fired
+                    // `remaining + 120 ms` after we entered finish) to have
+                    // been consumed by the target window before swapping the
+                    // clipboard back.
+                    let cb_restore = cb_for_callback.clone();
+                    let restore_after = remaining + std::time::Duration::from_millis(800);
+                    glib::timeout_add_local_once(restore_after, move || match prev {
+                        Some(t) => cb_restore.set_text(&t),
+                        None => cb_restore.set_text(""),
+                    });
+                });
+            } else {
+                clipboard.set_text(full_text);
+            }
         }
 
         // icon-mode: hold processing animation for min duration, then play
