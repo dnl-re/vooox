@@ -16,6 +16,7 @@ pub enum ServerMsg {
     ConfigOk,
     Segment { text: String, start: f32, end: f32 },
     Done { full_text: String, language: String, duration_ms: u64 },
+    Ready { model: String },
     Bye,
     Error { msg: String },
 }
@@ -26,6 +27,7 @@ pub enum ClientMsg {
     Health,
     Models,
     Config { model: String, language: String },
+    EnsureModel { model: String },
     Transcribe { audio_b64: String },
     Shutdown,
 }
@@ -61,6 +63,20 @@ impl WhisperClient {
         let mut ws = self.connect().await?;
         send_msg(&mut ws, &ClientMsg::Health).await?;
         recv_msg(&mut ws).await
+    }
+
+    /// Triggers an explicit download of the named model. Blocks until HF
+    /// finishes (which for `large-v3` can easily be 30+ minutes on a slow
+    /// connection); the sidecar runs the download in a worker thread so the
+    /// WS itself stays responsive.
+    pub async fn ensure_model(&self, model: &str) -> Result<(), String> {
+        let mut ws = self.connect().await?;
+        send_msg(&mut ws, &ClientMsg::EnsureModel { model: model.into() }).await?;
+        match recv_msg(&mut ws).await? {
+            ServerMsg::Ready { .. } => Ok(()),
+            ServerMsg::Error { msg } => Err(msg),
+            other => Err(format!("unexpected: {other:?}")),
+        }
     }
 
     pub async fn set_config(&self, model: &str, language: &str) -> Result<(), String> {

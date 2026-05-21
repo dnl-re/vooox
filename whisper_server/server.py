@@ -29,10 +29,12 @@ from faster_whisper import WhisperModel
 # ── config ──────────────────────────────────────────────────────────────────
 
 def _cuda_available() -> bool:
+    # CTranslate2 is the inference backend of faster-whisper and ships with
+    # its own CUDA runtime detection — no torch dependency needed.
     try:
-        import torch
-        return torch.cuda.is_available()
-    except ImportError:
+        import ctranslate2
+        return ctranslate2.get_cuda_device_count() > 0
+    except (ImportError, AttributeError):
         return False
 
 
@@ -65,14 +67,26 @@ class State:
         self.language: str = DEFAULT_LANGUAGE
         self._model: WhisperModel | None = None
 
-    def _load_model(self, name: str) -> WhisperModel:
+    def _load_model(self, name: str, allow_download: bool = False) -> WhisperModel:
         compute = "float16" if DEVICE == "cuda" else "int8"
-        return WhisperModel(name, device=DEVICE, compute_type=compute)
+        # local_files_only=True ensures we never trigger an implicit HF download
+        # from a transcribe call. Explicit downloads go through ensure_model().
+        return WhisperModel(
+            name,
+            device=DEVICE,
+            compute_type=compute,
+            local_files_only=not allow_download,
+        )
 
     def get_model(self) -> WhisperModel:
         if self._model is None:
-            self._model = self._load_model(self.model_name)
+            self._model = self._load_model(self.model_name, allow_download=False)
         return self._model
+
+    def ensure_model(self, name: str) -> None:
+        """Force-load (and download if missing) the named model, then cache it."""
+        self._model = self._load_model(name, allow_download=True)
+        self.model_name = name
 
     def set_config(self, model: str | None, language: str | None):
         changed = False
@@ -111,6 +125,17 @@ async def handle_config(ws, msg: dict):
     await ws.send(json.dumps({"type": "config_ok"}))
 
 
+async def handle_ensure_model(ws, msg: dict):
+    name = msg.get("model") or state.model_name
+    try:
+        # Run the blocking download in a thread so the WS event loop stays
+        # responsive (so the client can still send a cancel/shutdown).
+        await asyncio.to_thread(state.ensure_model, name)
+        await ws.send(json.dumps({"type": "ready", "model": name}))
+    except Exception as e:  # noqa: BLE001 — surface any failure to the UI
+        await ws.send(json.dumps({"type": "error", "msg": f"ensure_model: {e}"}))
+
+
 async def handle_transcribe(ws, msg: dict):
     import time
     audio_b64 = msg.get("audio_b64", "")
@@ -123,7 +148,15 @@ async def handle_transcribe(ws, msg: dict):
 
     try:
         t0 = time.monotonic()
-        model = state.get_model()
+        try:
+            model = state.get_model()
+        except Exception as e:  # noqa: BLE001
+            await ws.send(json.dumps({
+                "type": "error",
+                "msg": f"model '{state.model_name}' not available locally — "
+                       f"open Settings → Whisper to download it ({e})",
+            }))
+            return
         lang = state.language if state.language != "auto" else None
         segments, info = model.transcribe(
             tmp_path,
@@ -176,6 +209,8 @@ async def handler(ws):
                 await handle_models(ws)
             elif t == "config":
                 await handle_config(ws, msg)
+            elif t == "ensure_model":
+                await handle_ensure_model(ws, msg)
             elif t == "transcribe":
                 await handle_transcribe(ws, msg)
             elif t == "shutdown":
@@ -194,9 +229,9 @@ async def main():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
 
-    # pre-load the model so first transcription isn't slow
-    state.get_model()
-
+    # Note: no model pre-load. Sidecar must start fast even without any model
+    # downloaded yet — explicit downloads are triggered by ensure_model from
+    # the setup wizard / settings.
     async with websockets.serve(handler, "127.0.0.1", port, max_size=100 * 1024 * 1024):
         # signal readiness to the Rust parent — must be the first stdout line
         print(f"VOOOX_PORT={port}", flush=True)

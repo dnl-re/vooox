@@ -20,6 +20,8 @@ pub struct Config {
     pub auto_paste_toggle: bool,
     #[serde(default)]
     pub auto_paste_ptt: bool,
+    #[serde(default)]
+    pub setup_completed: bool,
 }
 
 fn default_ptt_enabled() -> bool {
@@ -73,6 +75,7 @@ impl Default for Config {
             push_to_talk_threshold_ms: 500,
             auto_paste_toggle: false,
             auto_paste_ptt: false,
+            setup_completed: false,
         }
     }
 }

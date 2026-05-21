@@ -1,5 +1,18 @@
+use crate::paths;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+
+/// Returns the path to the Python interpreter to use for the sidecar.
+/// Prefers the project-managed venv (Production / AppImage); falls back to
+/// system `python3` when the venv hasn't been set up yet (Dev mode).
+pub fn python_command() -> PathBuf {
+    if paths::venv_python_exists() {
+        paths::venv_python()
+    } else {
+        PathBuf::from("python3")
+    }
+}
 
 pub fn spawn_sidecar() -> Result<(Child, u16), String> {
     let candidates = [
@@ -15,12 +28,13 @@ pub fn spawn_sidecar() -> Result<(Child, u16), String> {
         .ok_or("whisper_server/server.py not found")?
         .clone();
 
-    let mut child = Command::new("python3")
+    let python = python_command();
+    let mut child = Command::new(&python)
         .arg(&server_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|e| format!("could not start sidecar: {e}"))?;
+        .map_err(|e| format!("could not start sidecar ({}): {e}", python.display()))?;
 
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);

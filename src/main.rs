@@ -3,11 +3,14 @@ mod config;
 mod dictation_panel;
 mod history;
 mod history_window;
+mod paths;
 mod settings;
+mod setup_window;
 mod shortcuts;
 mod sidecar;
 mod tray;
 mod whisper_client;
+mod whisper_models;
 mod window_state;
 mod x11_window;
 
@@ -64,11 +67,20 @@ fn main() -> glib::ExitCode {
         return glib::ExitCode::from(code as u8);
     }
 
+    let skip_setup = args.iter().any(|a| a == "--skip-setup");
+
     let app = Application::builder()
         .application_id("de.vooox.app")
         .build();
 
-    app.connect_activate(|app| build_ui(app));
+    app.connect_activate(move |app| {
+        if !skip_setup && !paths::setup_is_complete() {
+            let app_for_done = app.clone();
+            setup_window::show(app, move || build_ui(&app_for_done));
+        } else {
+            build_ui(app);
+        }
+    });
     app.run()
 }
 
