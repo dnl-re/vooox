@@ -23,7 +23,7 @@ impl SettingsWindow {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("vooox — Einstellungen")
-            .default_width(760)
+            .default_width(840)
             .default_height(620)
             .build();
 
