@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod dictation_panel;
+mod gpu;
 mod history;
 mod history_window;
 mod paths;
@@ -88,6 +89,14 @@ fn main() -> glib::ExitCode {
 
 fn build_ui(app: &Application) {
     let config = Rc::new(RefCell::new(Config::load()));
+
+    // Force-CPU-Toggle wirkt nur beim Sidecar-Start: hier ans env weitergeben,
+    // bevor wir den Subprocess spawnen.
+    if config.borrow().force_cpu {
+        std::env::set_var("VOOOX_FORCE_CPU", "1");
+    } else {
+        std::env::remove_var("VOOOX_FORCE_CPU");
+    }
 
     let (sidecar, port) = match sidecar::spawn_sidecar() {
         Ok(x) => x,

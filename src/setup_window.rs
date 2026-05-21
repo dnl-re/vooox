@@ -8,6 +8,7 @@
 //! On completion the marker file (`paths::setup_marker()`) is written and the
 //! supplied `on_done` callback runs — that bootstraps the normal app.
 
+use crate::gpu;
 use crate::paths;
 use crate::sidecar;
 use crate::whisper_client::WhisperClient;
@@ -38,6 +39,7 @@ pub fn show<F: Fn() + 'static>(app: &Application, on_done: F) {
 
     stack.add_named(&build_page_system_check(&stack), Some("check"));
     stack.add_named(&build_page_install(&stack), Some("install"));
+    stack.add_named(&build_page_gpu(&stack), Some("gpu"));
     stack.add_named(
         &build_page_model(&window, &stack, Rc::clone(&on_done)),
         Some("model"),
@@ -57,7 +59,7 @@ pub fn show<F: Fn() + 'static>(app: &Application, on_done: F) {
     // missing marker file only), skip ahead to the model page so we don't make
     // the user reinstall.
     if paths::venv_has_faster_whisper() {
-        stack.set_visible_child_name("model");
+        stack.set_visible_child_name("gpu");
     }
 }
 
@@ -432,7 +434,7 @@ fn build_page_install(stack: &Stack) -> GtkBox {
     {
         let stack = stack.clone();
         next_btn.connect_clicked(move |_| {
-            stack.set_visible_child_name("model");
+            stack.set_visible_child_name("gpu");
         });
     }
 
@@ -550,7 +552,252 @@ fn append_log(buf: &TextBuffer, view: &TextView, line: &str) {
     buf.delete_mark(&line_start);
 }
 
-// ── page 3: model download ───────────────────────────────────────────────
+// ── page 3: GPU-Beschleunigung ───────────────────────────────────────────
+
+fn build_page_gpu(stack: &Stack) -> GtkBox {
+    let page = page_box();
+
+    let title = heading("3 · GPU-Beschleunigung");
+    let subtitle = Label::new(Some(
+        "Whisper kann optional auf einer NVIDIA-GPU laufen — das macht vor allem bei \
+         den größeren Modellen (medium, large-v3) einen großen Geschwindigkeitsunterschied. \
+         Ohne GPU sind die kleineren Modelle (tiny, small) die sinnvolle Wahl.",
+    ));
+    subtitle.set_xalign(0.0);
+    subtitle.set_wrap(true);
+
+    let status_row = StatusRow::new();
+    let detail_lbl = Label::new(None);
+    detail_lbl.set_xalign(0.0);
+    detail_lbl.set_wrap(true);
+    detail_lbl.set_use_markup(true);
+
+    let install_btn = Button::with_label(&format!(
+        "GPU-Unterstützung installieren ({})",
+        gpu::estimated_download_label()
+    ));
+    install_btn.set_visible(false);
+
+    let spinner = Spinner::new();
+    spinner.set_visible(false);
+
+    let action_row = GtkBox::new(Orientation::Horizontal, 8);
+    action_row.append(&install_btn);
+    action_row.append(&spinner);
+
+    let log_buffer = TextBuffer::new(None);
+    let log_view = TextView::with_buffer(&log_buffer);
+    log_view.set_editable(false);
+    log_view.set_monospace(true);
+    let log_scroll = ScrolledWindow::builder()
+        .height_request(180)
+        .child(&log_view)
+        .build();
+    log_scroll.set_visible(false);
+
+    let spacer = GtkBox::new(Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+
+    let skip_btn = Button::with_label("Überspringen (nur CPU)");
+    let next_btn = Button::with_label("Weiter");
+    next_btn.add_css_class("suggested-action");
+    let buttons = button_row(&[&skip_btn, &next_btn]);
+
+    page.append(&title);
+    page.append(&subtitle);
+    page.append(&status_row.widget);
+    page.append(&detail_lbl);
+    page.append(&action_row);
+    page.append(&log_scroll);
+    page.append(&spacer);
+    page.append(&buttons);
+
+    // Detection und UI-Update kapseln, damit nach erfolgreichem Install ein
+    // refresh genügt um Status und Button-Sichtbarkeit anzupassen.
+    let refresh = {
+        let status_row = status_row.clone();
+        let detail_lbl = detail_lbl.clone();
+        let install_btn = install_btn.clone();
+        let next_btn = next_btn.clone();
+        let skip_btn = skip_btn.clone();
+        move || {
+            let hw = gpu::detect_hardware();
+            let wheels = gpu::wheels_installed();
+            match (&hw, wheels) {
+                (gpu::NvidiaHardware::None, _) => {
+                    status_row.set(
+                        Status::Info,
+                        "Keine NVIDIA-GPU im System gefunden — vooox läuft auf der CPU.",
+                    );
+                    detail_lbl.set_markup(
+                        "<b>Empfehlung:</b> Wähle auf der nächsten Seite ein kleines Modell \
+                         (<tt>tiny</tt> oder <tt>small</tt>). Größere Modelle wären auf der CPU \
+                         deutlich zu langsam für flüssiges Diktieren.",
+                    );
+                    install_btn.set_visible(false);
+                    skip_btn.set_label("Weiter");
+                    skip_btn.set_visible(false);
+                    next_btn.set_visible(true);
+                }
+                (gpu::NvidiaHardware::NoDriver, _) => {
+                    status_row.set(
+                        Status::Warn,
+                        "NVIDIA-Karte erkannt, aber der proprietäre Treiber ist nicht installiert.",
+                    );
+                    detail_lbl.set_markup(
+                        "Installiere den Treiber (z. B. <tt>nvidia-driver-535</tt>) über deinen \
+                         Paketmanager und starte den Rechner neu, um GPU-Beschleunigung später \
+                         zu aktivieren.\n\n\
+                         <b>Empfehlung für jetzt:</b> Wähle ein kleines Modell \
+                         (<tt>tiny</tt> oder <tt>small</tt>) — vooox läuft solange auf der CPU.",
+                    );
+                    install_btn.set_visible(false);
+                    skip_btn.set_visible(false);
+                    next_btn.set_visible(true);
+                }
+                (gpu::NvidiaHardware::DriverTooOld { driver }, _) => {
+                    status_row.set(
+                        Status::Warn,
+                        &format!(
+                            "NVIDIA-Treiber <b>{driver}</b> ist zu alt — CUDA 12 braucht \
+                             mindestens Version 525.",
+                        ),
+                    );
+                    detail_lbl.set_markup(
+                        "Aktualisiere den Treiber über deinen Paketmanager, um GPU-Beschleunigung \
+                         später nutzen zu können.\n\n\
+                         <b>Empfehlung für jetzt:</b> Wähle ein kleines Modell \
+                         (<tt>tiny</tt> oder <tt>small</tt>).",
+                    );
+                    install_btn.set_visible(false);
+                    skip_btn.set_visible(false);
+                    next_btn.set_visible(true);
+                }
+                (gpu::NvidiaHardware::Ok { driver }, false) => {
+                    status_row.set(
+                        Status::Ok,
+                        &format!(
+                            "NVIDIA-GPU erkannt — Treiber <b>{driver}</b> unterstützt CUDA 12.",
+                        ),
+                    );
+                    detail_lbl.set_markup(
+                        "Du kannst die CUDA- und cuDNN-Libraries jetzt installieren — das \
+                         beschleunigt die Transkription erheblich und macht die Modelle \
+                         <tt>medium</tt> und <tt>large-v3</tt> erst sinnvoll nutzbar. \
+                         Du kannst das auch später unter <tt>Einstellungen → Whisper</tt> \
+                         nachholen.",
+                    );
+                    install_btn.set_visible(true);
+                    install_btn.set_sensitive(true);
+                    skip_btn.set_label("Überspringen (nur CPU)");
+                    skip_btn.set_visible(true);
+                    next_btn.set_visible(false);
+                }
+                (gpu::NvidiaHardware::Ok { driver }, true) => {
+                    status_row.set(
+                        Status::Ok,
+                        &format!(
+                            "GPU-Beschleunigung eingerichtet — Treiber <b>{driver}</b>, \
+                             CUDA-Libraries installiert.",
+                        ),
+                    );
+                    detail_lbl.set_markup(
+                        "Du kannst alle Modelle inklusive <tt>medium</tt> und <tt>large-v3</tt> \
+                         flüssig nutzen.",
+                    );
+                    install_btn.set_visible(false);
+                    skip_btn.set_visible(false);
+                    next_btn.set_visible(true);
+                }
+            }
+        }
+    };
+    refresh();
+
+    // Install-Button: pip install in Thread, Live-Log, refresh am Ende.
+    {
+        let spinner = spinner.clone();
+        let log_buffer = log_buffer.clone();
+        let log_view = log_view.clone();
+        let log_scroll = log_scroll.clone();
+        let skip_btn = skip_btn.clone();
+        let refresh = refresh.clone();
+        install_btn.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            skip_btn.set_sensitive(false);
+            spinner.set_visible(true);
+            spinner.start();
+            log_scroll.set_visible(true);
+            log_buffer.set_text("");
+
+            let (tx, rx) = mpsc::channel::<gpu::InstallMsg>();
+            gpu::spawn_cuda_install_thread(tx);
+
+            let spinner = spinner.clone();
+            let log_buffer = log_buffer.clone();
+            let log_view = log_view.clone();
+            let skip_btn = skip_btn.clone();
+            let refresh = refresh.clone();
+            let btn = btn.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                let mut done = false;
+                let mut had_error = false;
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        gpu::InstallMsg::Line(line) => append_log(&log_buffer, &log_view, &line),
+                        gpu::InstallMsg::Done => {
+                            done = true;
+                            break;
+                        }
+                        gpu::InstallMsg::Error(e) => {
+                            append_log(&log_buffer, &log_view, &format!("\n✗ FEHLER: {e}"));
+                            had_error = true;
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                if done {
+                    spinner.stop();
+                    spinner.set_visible(false);
+                    skip_btn.set_sensitive(true);
+                    if had_error {
+                        btn.set_label("Erneut versuchen");
+                        btn.set_sensitive(true);
+                    } else {
+                        append_log(&log_buffer, &log_view, "");
+                        append_log(
+                            &log_buffer,
+                            &log_view,
+                            "✓ CUDA-Libraries installiert. GPU-Beschleunigung ist aktiv.",
+                        );
+                        refresh();
+                    }
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        });
+    }
+
+    {
+        let stack = stack.clone();
+        skip_btn.connect_clicked(move |_| {
+            stack.set_visible_child_name("model");
+        });
+    }
+    {
+        let stack = stack.clone();
+        next_btn.connect_clicked(move |_| {
+            stack.set_visible_child_name("model");
+        });
+    }
+
+    page
+}
+
+// ── page 4: model download ───────────────────────────────────────────────
 
 fn build_page_model(
     window: &ApplicationWindow,
@@ -559,7 +806,7 @@ fn build_page_model(
 ) -> GtkBox {
     let page = page_box();
 
-    let title = heading("3 · Sprachmodell wählen");
+    let title = heading("4 · Sprachmodell wählen");
     let info = Label::new(Some(
         "Wähle ein Whisper-Modell. Größere Modelle erkennen besser, brauchen aber \
          mehr Plattenplatz und Rechenzeit. Du kannst das später in den Einstellungen \
@@ -568,11 +815,32 @@ fn build_page_model(
     info.set_xalign(0.0);
     info.set_wrap(true);
 
+    // Empfehlung passend zur GPU-Situation: ohne GPU sind nur kleine Modelle
+    // praktikabel, mit GPU dürfen es auch die großen sein.
+    let recommendation = Label::new(None);
+    recommendation.set_xalign(0.0);
+    recommendation.set_wrap(true);
+    recommendation.set_use_markup(true);
+    let gpu_active = gpu::wheels_installed()
+        && matches!(gpu::detect_hardware(), gpu::NvidiaHardware::Ok { .. });
+    if gpu_active {
+        recommendation.set_markup(
+            "<b>Empfehlung (mit GPU):</b> <tt>medium</tt> oder <tt>large-v3</tt> für beste \
+             Genauigkeit, oder <tt>small</tt> für schnellere Latenz.",
+        );
+    } else {
+        recommendation.set_markup(
+            "<b>Empfehlung (CPU-only):</b> <tt>tiny</tt> oder <tt>small</tt>. Größere Modelle \
+             wären auf der CPU zu langsam für flüssiges Diktieren.",
+        );
+    }
+
     let combo = ComboBoxText::new();
     for m in whisper_models::MODELS {
         combo.append(Some(m.id), &format!("{} ({})", m.id, whisper_models::size_label(m.id)));
     }
-    combo.set_active_id(Some("small"));
+    let default_model = if gpu_active { "medium" } else { "small" };
+    combo.set_active_id(Some(default_model));
 
     let size_lbl = Label::new(None);
     size_lbl.set_xalign(0.0);
@@ -585,7 +853,7 @@ fn build_page_model(
                 whisper_models::size_label(id)
             ));
         };
-        update("small");
+        update(default_model);
         combo.connect_changed(move |cb| {
             if let Some(id) = cb.active_id() {
                 update(&id);
@@ -605,6 +873,7 @@ fn build_page_model(
 
     page.append(&title);
     page.append(&info);
+    page.append(&recommendation);
     page.append(&combo);
     page.append(&size_lbl);
     page.append(&spinner);

@@ -22,6 +22,8 @@ pub struct Config {
     pub auto_paste_ptt: bool,
     #[serde(default)]
     pub setup_completed: bool,
+    #[serde(default)]
+    pub force_cpu: bool,
 }
 
 fn default_ptt_enabled() -> bool {
@@ -76,6 +78,7 @@ impl Default for Config {
             auto_paste_toggle: false,
             auto_paste_ptt: false,
             setup_completed: false,
+            force_cpu: false,
         }
     }
 }

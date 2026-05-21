@@ -1,5 +1,6 @@
 use crate::audio;
 use crate::config::Config;
+use crate::gpu;
 use crate::whisper_client::WhisperClient;
 use crate::whisper_models;
 use crate::x11_window;
@@ -8,7 +9,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, CheckButton, ComboBoxText,
     Entry, Label, LevelBar, ListBox, ListBoxRow, Notebook, Orientation, ScrolledWindow, Separator,
-    SpinButton, Spinner, ToggleButton,
+    SpinButton, Spinner, TextBuffer, TextView, ToggleButton,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -408,9 +409,250 @@ fn build_whisper_tab(config: Rc<RefCell<Config>>, whisper_port: u16) -> GtkBox {
     vbox.append(&size_lbl);
     vbox.append(&action_row);
     vbox.append(&Separator::new(Orientation::Horizontal));
+    vbox.append(&build_gpu_section(Rc::clone(&config)));
+    vbox.append(&Separator::new(Orientation::Horizontal));
     vbox.append(&lang_lbl);
     vbox.append(&lang_combo);
     vbox
+}
+
+// ── GPU-Sektion innerhalb des Whisper-Tabs ───────────────────────────────────
+
+fn build_gpu_section(config: Rc<RefCell<Config>>) -> GtkBox {
+    let section = GtkBox::new(Orientation::Vertical, 6);
+
+    let heading = Label::new(None);
+    heading.set_markup("<b>GPU-Beschleunigung</b>");
+    heading.set_xalign(0.0);
+
+    let status_lbl = Label::new(None);
+    status_lbl.set_xalign(0.0);
+    status_lbl.set_wrap(true);
+    status_lbl.set_use_markup(true);
+
+    let detail_lbl = Label::new(None);
+    detail_lbl.set_xalign(0.0);
+    detail_lbl.set_wrap(true);
+
+    let install_btn = Button::with_label(&format!(
+        "GPU-Unterstützung installieren ({})",
+        gpu::estimated_download_label()
+    ));
+    let force_cpu_btn = CheckButton::with_label(
+        "GPU deaktivieren und immer auf CPU rechnen (z. B. für Akkulaufzeit)",
+    );
+    force_cpu_btn.set_active(config.borrow().force_cpu);
+
+    // Log-View ist initial versteckt; wird beim Klick auf Install eingeblendet.
+    let log_buffer = TextBuffer::new(None);
+    let log_view = TextView::with_buffer(&log_buffer);
+    log_view.set_editable(false);
+    log_view.set_monospace(true);
+    let log_scroll = ScrolledWindow::builder()
+        .height_request(160)
+        .child(&log_view)
+        .build();
+    log_scroll.set_visible(false);
+
+    let spinner = Spinner::new();
+    spinner.set_visible(false);
+
+    let action_row = GtkBox::new(Orientation::Horizontal, 8);
+    action_row.append(&install_btn);
+    action_row.append(&spinner);
+
+    // Update der UI basierend auf Hardware-Detection + venv-Zustand.
+    let refresh = {
+        let status_lbl = status_lbl.clone();
+        let detail_lbl = detail_lbl.clone();
+        let install_btn = install_btn.clone();
+        let force_cpu_btn = force_cpu_btn.clone();
+        move || {
+            let hw = gpu::detect_hardware();
+            let active = gpu::libs_active_in_venv();
+            let wheels = gpu::wheels_installed();
+
+            match (&hw, active, wheels) {
+                (gpu::NvidiaHardware::None, _, _) => {
+                    status_lbl.set_markup("Verarbeitung: <b>CPU</b>");
+                    detail_lbl.set_text(
+                        "Keine NVIDIA-GPU im System gefunden — vooox läuft auf der CPU.",
+                    );
+                    install_btn.set_visible(false);
+                    force_cpu_btn.set_visible(false);
+                }
+                (gpu::NvidiaHardware::NoDriver, _, _) => {
+                    status_lbl.set_markup("Verarbeitung: <b>CPU</b> (Treiber fehlt)");
+                    detail_lbl.set_text(
+                        "NVIDIA-Karte erkannt, aber der proprietäre Treiber ist nicht installiert. \
+                         Installiere ihn über deinen Paketmanager (z. B. `nvidia-driver-535`) \
+                         und starte den Rechner neu.",
+                    );
+                    install_btn.set_visible(false);
+                    force_cpu_btn.set_visible(false);
+                }
+                (gpu::NvidiaHardware::DriverTooOld { driver }, _, _) => {
+                    status_lbl
+                        .set_markup(&format!("Verarbeitung: <b>CPU</b> (Treiber {driver} zu alt)"));
+                    detail_lbl.set_text(
+                        "Der NVIDIA-Treiber muss mindestens Version 525 sein, um CUDA 12 zu \
+                         unterstützen. Aktualisiere ihn über deinen Paketmanager.",
+                    );
+                    install_btn.set_visible(false);
+                    force_cpu_btn.set_visible(false);
+                }
+                (gpu::NvidiaHardware::Ok { driver }, true, _) => {
+                    status_lbl.set_markup(&format!(
+                        "Verarbeitung: <b>GPU (CUDA)</b> — Treiber {driver}",
+                    ));
+                    detail_lbl.set_text(
+                        "GPU-Beschleunigung ist aktiv. Bei größeren Modellen (medium / large-v3) \
+                         macht das einen spürbaren Unterschied.",
+                    );
+                    install_btn.set_visible(false);
+                    force_cpu_btn.set_visible(true);
+                }
+                (gpu::NvidiaHardware::Ok { driver }, false, true) => {
+                    // Wheels da, aber ctranslate2 sieht nichts — meist
+                    // Treiber-Library-Mismatch oder force-cpu noch aus dem
+                    // vorigen Sidecar.
+                    status_lbl.set_markup(&format!(
+                        "Verarbeitung: <b>CPU</b> (Treiber {driver}, CUDA-Libraries installiert)",
+                    ));
+                    detail_lbl.set_text(
+                        "Die CUDA-Pakete sind installiert, vooox nutzt aber gerade die CPU. \
+                         Falls die GPU-Deaktivierung aus ist: vooox neu starten — der Sidecar \
+                         läuft noch mit der alten Konfiguration.",
+                    );
+                    install_btn.set_visible(false);
+                    force_cpu_btn.set_visible(true);
+                }
+                (gpu::NvidiaHardware::Ok { driver }, false, false) => {
+                    status_lbl.set_markup(&format!(
+                        "Verarbeitung: <b>CPU</b> — GPU verfügbar (Treiber {driver})",
+                    ));
+                    detail_lbl.set_text(
+                        "Du kannst die CUDA-Libraries jetzt nachinstallieren, um Transkriptionen \
+                         deutlich zu beschleunigen. Nach der Installation vooox einmal neu \
+                         starten.",
+                    );
+                    install_btn.set_visible(true);
+                    install_btn.set_sensitive(true);
+                    force_cpu_btn.set_visible(false);
+                }
+            }
+        }
+    };
+    refresh();
+
+    // Force-CPU-Toggle: speichert Config; greift beim nächsten Sidecar-Start.
+    {
+        let cfg = Rc::clone(&config);
+        let refresh = refresh.clone();
+        force_cpu_btn.connect_toggled(move |btn| {
+            cfg.borrow_mut().force_cpu = btn.is_active();
+            refresh();
+        });
+    }
+
+    // Install-Button → CUDA-Wheels installieren mit Live-Log.
+    {
+        let spinner = spinner.clone();
+        let log_buffer = log_buffer.clone();
+        let log_view = log_view.clone();
+        let log_scroll = log_scroll.clone();
+        let detail_lbl = detail_lbl.clone();
+        let refresh = refresh.clone();
+        install_btn.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            spinner.set_visible(true);
+            spinner.start();
+            log_scroll.set_visible(true);
+            log_buffer.set_text("");
+            detail_lbl.set_text(
+                "Lade CUDA- und cuDNN-Libraries herunter — kann ein paar Minuten dauern.",
+            );
+
+            let (tx, rx) = mpsc::channel::<gpu::InstallMsg>();
+            gpu::spawn_cuda_install_thread(tx);
+
+            let spinner = spinner.clone();
+            let log_buffer = log_buffer.clone();
+            let log_view = log_view.clone();
+            let detail_lbl = detail_lbl.clone();
+            let refresh = refresh.clone();
+            let btn = btn.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                let mut done = false;
+                let mut had_error = false;
+                while let Ok(m) = rx.try_recv() {
+                    match m {
+                        gpu::InstallMsg::Line(line) => append_gpu_log(&log_buffer, &log_view, &line),
+                        gpu::InstallMsg::Done => {
+                            done = true;
+                            break;
+                        }
+                        gpu::InstallMsg::Error(e) => {
+                            append_gpu_log(
+                                &log_buffer,
+                                &log_view,
+                                &format!("\n✗ FEHLER: {e}"),
+                            );
+                            had_error = true;
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                if done {
+                    spinner.stop();
+                    spinner.set_visible(false);
+                    if had_error {
+                        btn.set_label("Erneut versuchen");
+                        btn.set_sensitive(true);
+                        detail_lbl.set_text(
+                            "Installation fehlgeschlagen — Details siehe Log oben.",
+                        );
+                    } else {
+                        append_gpu_log(&log_buffer, &log_view, "");
+                        append_gpu_log(
+                            &log_buffer,
+                            &log_view,
+                            "✓ CUDA-Libraries installiert. vooox neu starten, damit der \
+                             Sidecar die GPU benutzt.",
+                        );
+                        detail_lbl.set_text(
+                            "Fertig — vooox einmal neu starten, dann läuft die Transkription \
+                             auf der GPU.",
+                        );
+                        refresh();
+                    }
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        });
+    }
+
+    section.append(&heading);
+    section.append(&status_lbl);
+    section.append(&detail_lbl);
+    section.append(&action_row);
+    section.append(&log_scroll);
+    section.append(&force_cpu_btn);
+    section
+}
+
+fn append_gpu_log(buf: &TextBuffer, view: &TextView, line: &str) {
+    let mut iter = buf.end_iter();
+    if buf.char_count() > 0 {
+        buf.insert(&mut iter, "\n");
+    }
+    let line_start = buf.create_mark(None, &iter, true);
+    buf.insert(&mut iter, line);
+    view.scroll_to_mark(&line_start, 0.0, true, 0.0, 1.0);
+    buf.delete_mark(&line_start);
 }
 
 // ── Shortcut-Tab ──────────────────────────────────────────────────────────

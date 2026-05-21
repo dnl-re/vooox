@@ -40,7 +40,10 @@ def _cuda_available() -> bool:
 
 DEFAULT_MODEL = os.environ.get("VOOOX_MODEL", "small")
 DEFAULT_LANGUAGE = os.environ.get("VOOOX_LANGUAGE", "de")
-DEVICE = "cuda" if _cuda_available() else "cpu"
+# VOOOX_FORCE_CPU=1 lets the user opt out of GPU even when CUDA libs are
+# present (useful on laptops where battery > speed).
+FORCE_CPU = os.environ.get("VOOOX_FORCE_CPU", "").strip() not in ("", "0", "false", "False")
+DEVICE = "cuda" if (_cuda_available() and not FORCE_CPU) else "cpu"
 
 
 def _list_local_models() -> list[str]:
