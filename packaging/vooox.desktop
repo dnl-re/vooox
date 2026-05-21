@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=vooox
+GenericName=Speech-to-Text
+Comment=Local speech-to-text with a global shortcut
+Exec=vooox
+Icon=vooox
+Categories=Utility;AudioVideo;
+Terminal=false
+StartupNotify=false
+Keywords=speech;dictation;whisper;transcription;

@@ -128,10 +128,16 @@ impl Config {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let exe = std::env::current_exe()
-                .unwrap_or_else(|_| PathBuf::from("vooox"))
-                .display()
-                .to_string();
+            // Inside an AppImage, current_exe() points into the FUSE mount
+            // (/tmp/.mount_…/usr/bin/vooox) which disappears on exit. The
+            // AppImage runtime sets $APPIMAGE to the stable .AppImage path
+            // for exactly this purpose.
+            let exe = std::env::var("APPIMAGE").unwrap_or_else(|_| {
+                std::env::current_exe()
+                    .unwrap_or_else(|_| PathBuf::from("vooox"))
+                    .display()
+                    .to_string()
+            });
             let entry = format!(
                 "[Desktop Entry]\nType=Application\nName=vooox\nExec={exe}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n"
             );

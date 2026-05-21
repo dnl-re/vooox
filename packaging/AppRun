@@ -1,0 +1,7 @@
+#!/bin/sh
+# Entry point for the vooox AppImage.
+# AppImage runtime sets $APPDIR; we resolve our own dir defensively in case
+# the script is run directly out of an extracted AppDir.
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$PATH"
+exec "$HERE/usr/bin/vooox" "$@"
