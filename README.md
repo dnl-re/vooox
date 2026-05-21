@@ -8,7 +8,7 @@ Lokale Speech-to-Text-Desktop-App für Linux. Globalen Shortcut drücken, sprech
 - **faster-whisper** (CTranslate2) als Engine — CPU oder optional CUDA-GPU
 - **Streaming**: Segmente erscheinen im Overlay sobald Whisper sie liefert
 - **Auto-Paste** an die zuletzt aktive Fenster-/Cursorposition mit Clipboard-Restore
-- **Drei-stufige Text-Injection**: `ydotool` (Wayland) → `xdotool` (X11) → `enigo` (XTest-Fallback)
+- **Zwei-stufige Text-Injection**: `xdotool` → `enigo` (XTest-Fallback)
 - **First-Run-Setup-Wizard**: System-Check, isoliertes Python-venv, optionale GPU-Pakete, Modell-Auswahl
 - **Settings-UI** mit Live-Mikrofon-Pegel, Modell-Download/Löschen, GPU-Status, Shortcut-Bindung
 - **Tray-Icon** und Verlauf der letzten 50 Transkriptionen (JSONL)
@@ -21,7 +21,7 @@ Rust-Binary (vooox)
 ├── GTK4 UI-Thread     — Settings, Overlay-Pille, Tray
 ├── Audio-Thread       — cpal-Mikrofon-Capture
 ├── Shortcut-Thread    — rdev globaler Key-Listener
-├── TextInjector       — ydotool → xdotool → enigo
+├── TextInjector       — xdotool → enigo
 └── WhisperClient      — WebSocket zum Python-Sidecar
 
 Python-Sidecar (whisper_server/server.py)
@@ -44,19 +44,14 @@ chmod +x vooox-x86_64.AppImage
 
 Beim ersten Start führt der Wizard durch System-Check, venv-Setup (~600 MB), optionale GPU-Installation und Modell-Auswahl.
 
+> **Hinweis:** Nur unter X11 entwickelt und getestet. Wayland wird **nicht** unterstützt — globale Shortcuts und Text-Injection an Fremdfenster funktionieren dort nicht.
+
 ### Aus Source bauen
 
 ```bash
 sudo apt install libgtk-4-dev libayatana-appindicator3-dev pkg-config
 cargo build --release
 ./target/release/vooox
-```
-
-Für Wayland-natives Text-Injection (z.B. GNOME Terminal):
-
-```bash
-sudo apt install ydotool
-systemctl --user enable --now ydotool
 ```
 
 ## Modelle
@@ -99,4 +94,4 @@ backlog board
 
 ## Lizenz
 
-Privates Projekt.
+MIT — siehe [LICENSE](LICENSE).
