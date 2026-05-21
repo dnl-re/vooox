@@ -10,30 +10,55 @@ use std::path::PathBuf;
 pub struct ModelInfo {
     pub id: &'static str,
     pub size_mb: u32,
-    /// Geschätzte Downloaddauer in Minuten bei ~10 Mbit/s.
-    pub minutes_10mbit: u32,
 }
 
 pub const MODELS: &[ModelInfo] = &[
-    ModelInfo { id: "tiny",     size_mb: 75,   minutes_10mbit: 1 },
-    ModelInfo { id: "base",     size_mb: 145,  minutes_10mbit: 2 },
-    ModelInfo { id: "small",    size_mb: 480,  minutes_10mbit: 7 },
-    ModelInfo { id: "medium",   size_mb: 1500, minutes_10mbit: 20 },
-    ModelInfo { id: "large-v2", size_mb: 3000, minutes_10mbit: 40 },
-    ModelInfo { id: "large-v3", size_mb: 3000, minutes_10mbit: 40 },
+    ModelInfo { id: "tiny",     size_mb: 75   },
+    ModelInfo { id: "base",     size_mb: 145  },
+    ModelInfo { id: "small",    size_mb: 480  },
+    ModelInfo { id: "medium",   size_mb: 1500 },
+    ModelInfo { id: "large-v2", size_mb: 3000 },
+    ModelInfo { id: "large-v3", size_mb: 3000 },
 ];
 
 pub fn info(id: &str) -> Option<ModelInfo> {
     MODELS.iter().copied().find(|m| m.id == id)
 }
 
+/// Geschätzte Downloaddauer bei 100 Mbit/s (~10 MB/s nutzbar) — als
+/// menschenlesbarer String.
+fn duration_at_100mbit(size_mb: u32) -> String {
+    let seconds = size_mb as f32 / 10.0;
+    if seconds < 60.0 {
+        "unter 1 min".into()
+    } else {
+        format!("ca. {} min", (seconds / 60.0).round() as u32)
+    }
+}
+
 pub fn size_label(id: &str) -> String {
     match info(id) {
-        Some(m) if m.size_mb >= 1000 => {
-            format!("ca. {:.1} GB (ca. {} min bei 10 Mbit)", m.size_mb as f32 / 1000.0, m.minutes_10mbit)
-        }
-        Some(m) => format!("ca. {} MB (ca. {} min bei 10 Mbit)", m.size_mb, m.minutes_10mbit),
+        Some(m) if m.size_mb >= 1000 => format!(
+            "ca. {:.1} GB · {} bei 100 Mbit",
+            m.size_mb as f32 / 1000.0,
+            duration_at_100mbit(m.size_mb)
+        ),
+        Some(m) => format!(
+            "ca. {} MB · {} bei 100 Mbit",
+            m.size_mb,
+            duration_at_100mbit(m.size_mb)
+        ),
         None => "unbekannte Größe".into(),
+    }
+}
+
+/// Kompakte Größenangabe ohne Dauer — für die Combobox, damit die Zeile dort
+/// nicht überlang wird.
+pub fn size_label_short(id: &str) -> String {
+    match info(id) {
+        Some(m) if m.size_mb >= 1000 => format!("ca. {:.1} GB", m.size_mb as f32 / 1000.0),
+        Some(m) => format!("ca. {} MB", m.size_mb),
+        None => "?".into(),
     }
 }
 

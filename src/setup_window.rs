@@ -28,8 +28,8 @@ pub fn show<F: Fn() + 'static>(app: &Application, on_done: F) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("vooox — Einrichtung")
-        .default_width(680)
-        .default_height(540)
+        .default_width(740)
+        .default_height(560)
         .build();
 
     let stack = Stack::new();
@@ -351,6 +351,7 @@ fn build_page_install(stack: &Stack) -> GtkBox {
 
     let start_btn = Button::with_label("Einrichtung starten");
     let next_btn = Button::with_label("Weiter");
+    next_btn.add_css_class("suggested-action");
     next_btn.set_sensitive(false);
     let buttons = button_row(&[&start_btn, &next_btn]);
 
@@ -576,14 +577,15 @@ fn build_page_gpu(stack: &Stack) -> GtkBox {
         "GPU-Unterstützung installieren ({})",
         gpu::estimated_download_label()
     ));
+    install_btn.add_css_class("suggested-action");
     install_btn.set_visible(false);
 
     let spinner = Spinner::new();
     spinner.set_visible(false);
 
-    let action_row = GtkBox::new(Orientation::Horizontal, 8);
-    action_row.append(&install_btn);
-    action_row.append(&spinner);
+    let spinner_row = GtkBox::new(Orientation::Horizontal, 8);
+    spinner_row.set_halign(gtk4::Align::Start);
+    spinner_row.append(&spinner);
 
     let log_buffer = TextBuffer::new(None);
     let log_view = TextView::with_buffer(&log_buffer);
@@ -598,16 +600,19 @@ fn build_page_gpu(stack: &Stack) -> GtkBox {
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
 
-    let skip_btn = Button::with_label("Überspringen (nur CPU)");
+    // Drei mögliche Button-Sets, die je nach refresh() ein-/ausgeblendet werden:
+    //   [Überspringen] [Installieren*]  — wenn GPU vorhanden, Wheels fehlen
+    //   [Weiter*]                       — sonst (kein NVIDIA, kein Treiber, oder schon eingerichtet)
+    let skip_btn = Button::with_label("Überspringen");
     let next_btn = Button::with_label("Weiter");
     next_btn.add_css_class("suggested-action");
-    let buttons = button_row(&[&skip_btn, &next_btn]);
+    let buttons = button_row(&[&skip_btn, &install_btn, &next_btn]);
 
     page.append(&title);
     page.append(&subtitle);
     page.append(&status_row.widget);
     page.append(&detail_lbl);
-    page.append(&action_row);
+    page.append(&spinner_row);
     page.append(&log_scroll);
     page.append(&spacer);
     page.append(&buttons);
@@ -689,7 +694,6 @@ fn build_page_gpu(stack: &Stack) -> GtkBox {
                     );
                     install_btn.set_visible(true);
                     install_btn.set_sensitive(true);
-                    skip_btn.set_label("Überspringen (nur CPU)");
                     skip_btn.set_visible(true);
                     next_btn.set_visible(false);
                 }
@@ -837,7 +841,10 @@ fn build_page_model(
 
     let combo = ComboBoxText::new();
     for m in whisper_models::MODELS {
-        combo.append(Some(m.id), &format!("{} ({})", m.id, whisper_models::size_label(m.id)));
+        combo.append(
+            Some(m.id),
+            &format!("{} — {}", m.id, whisper_models::size_label_short(m.id)),
+        );
     }
     let default_model = if gpu_active { "medium" } else { "small" };
     combo.set_active_id(Some(default_model));
@@ -861,15 +868,19 @@ fn build_page_model(
         });
     }
 
-    let download_btn = Button::with_label("Modell jetzt herunterladen");
-    let later_btn = Button::with_label("Später (vorerst kein Download)");
-    let buttons = button_row(&[&download_btn, &later_btn]);
+    let download_btn = Button::with_label("Jetzt herunterladen");
+    download_btn.add_css_class("suggested-action");
+    let later_btn = Button::with_label("Später");
+    let buttons = button_row(&[&later_btn, &download_btn]);
 
     let spinner = Spinner::new();
     spinner.set_visible(false);
     let status = Label::new(None);
     status.set_xalign(0.0);
     status.set_wrap(true);
+
+    let spacer = GtkBox::new(Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
 
     page.append(&title);
     page.append(&info);
@@ -878,6 +889,7 @@ fn build_page_model(
     page.append(&size_lbl);
     page.append(&spinner);
     page.append(&status);
+    page.append(&spacer);
     page.append(&buttons);
 
     let window = window.clone();
@@ -975,8 +987,12 @@ fn show_ready_page(window: &ApplicationWindow, on_done: Rc<dyn Fn()>) {
     start_btn.add_css_class("suggested-action");
     let buttons = button_row(&[&start_btn]);
 
+    let spacer = GtkBox::new(Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+
     page.append(&title);
     page.append(&info);
+    page.append(&spacer);
     page.append(&buttons);
 
     window.set_child(Some(&page));
