@@ -215,7 +215,6 @@ impl DictationPanel {
         match state {
             PillDot::Recording => { /* base .pill-dot class only — pulses red */ }
             PillDot::Processing => self.pill_dot.add_css_class("pill-dot-proc"),
-            PillDot::Done => self.pill_dot.add_css_class("pill-dot-done"),
         }
     }
 
@@ -472,7 +471,7 @@ impl DictationPanel {
                     dot.remove_css_class("pill-dot-proc");
                     dot.remove_css_class("pill-dot-done");
                     save_window_position(&panel_window, &win_state);
-                    panel_window.hide();
+                    panel_window.set_visible(false);
                 });
             }
             return;
@@ -539,7 +538,7 @@ impl DictationPanel {
 
     pub fn hide(&self) {
         save_window_position(&self.window, &self.win_state);
-        self.window.hide();
+        self.window.set_visible(false);
     }
 }
 
@@ -547,7 +546,6 @@ impl DictationPanel {
 enum PillDot {
     Recording,
     Processing,
-    Done,
 }
 
 /// Green "done" sweep across the pill waveform:
@@ -573,7 +571,7 @@ fn start_done_animation(
         let t = start.elapsed().as_secs_f32();
         if t >= total_dur {
             save_window_position(&win, &win_state);
-            win.hide();
+            win.set_visible(false);
             dot.remove_css_class("pill-dot-done");
             phase.set(PillPhase::Recording);
             area.queue_draw();
@@ -768,7 +766,7 @@ pub(crate) fn space_join(existing: &str, seg: &str) -> String {
 
 fn install_css() {
     let provider = CssProvider::new();
-    provider.load_from_data(CSS);
+    provider.load_from_string(CSS);
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,
@@ -1047,7 +1045,7 @@ fn wire_kebab_actions(
 fn wire_close_request(window: &ApplicationWindow, state: Rc<RefCell<WindowState>>) {
     window.connect_close_request(move |win| {
         save_window_position(win, &state);
-        win.hide();
+        win.set_visible(false);
         glib::Propagation::Stop
     });
 }

@@ -39,10 +39,6 @@ impl WindowState {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<(i32, i32)> {
-        self.positions.get(key).copied()
-    }
-
     pub fn set(&mut self, key: String, pos: (i32, i32)) {
         self.positions.insert(key, pos);
     }

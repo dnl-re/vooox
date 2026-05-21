@@ -89,7 +89,7 @@ fn main() -> glib::ExitCode {
 fn build_ui(app: &Application) {
     let config = Rc::new(RefCell::new(Config::load()));
 
-    let (mut sidecar, port) = match sidecar::spawn_sidecar() {
+    let (sidecar, port) = match sidecar::spawn_sidecar() {
         Ok(x) => x,
         Err(e) => {
             eprintln!("[main] sidecar failed: {e}");
