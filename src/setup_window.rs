@@ -67,42 +67,100 @@ fn build_page_system_check(stack: &Stack) -> GtkBox {
     let page = page_box();
 
     let title = heading("1 · System prüfen");
-    let status = Label::new(Some("Prüfe Python-Installation…"));
-    status.set_xalign(0.0);
-    status.set_wrap(true);
+    let subtitle = Label::new(Some(
+        "vooox prüft, welche Voraussetzungen schon erfüllt sind.",
+    ));
+    subtitle.set_xalign(0.0);
+    subtitle.add_css_class("dim-label");
+    subtitle.set_margin_bottom(6);
+
+    // Three status rows, each with its own colored icon so wrapping never
+    // separates the icon from the text body.
+    let python_row = StatusRow::new();
+    let xdotool_row = StatusRow::new();
+    let ydotool_row = StatusRow::new();
+
+    let list = GtkBox::new(Orientation::Vertical, 8);
+    list.append(&python_row.widget);
+    list.append(&xdotool_row.widget);
+    list.append(&ydotool_row.widget);
 
     let instructions = Label::new(None);
     instructions.set_xalign(0.0);
     instructions.set_wrap(true);
     instructions.set_selectable(true);
+    instructions.set_margin_top(8);
+
+    // Spacer pushes the button row to the bottom of the page regardless of
+    // content height.
+    let spacer = GtkBox::new(Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
 
     let recheck_btn = Button::with_label("Erneut prüfen");
     let next_btn = Button::with_label("Weiter");
+    next_btn.add_css_class("suggested-action");
     next_btn.set_sensitive(false);
 
     let buttons = button_row(&[&recheck_btn, &next_btn]);
 
     page.append(&title);
-    page.append(&status);
+    page.append(&subtitle);
+    page.append(&list);
     page.append(&instructions);
+    page.append(&spacer);
     page.append(&buttons);
 
     let run_check = {
-        let status = status.clone();
+        let python_row = python_row.clone();
+        let xdotool_row = xdotool_row.clone();
+        let ydotool_row = ydotool_row.clone();
         let instructions = instructions.clone();
         let next_btn = next_btn.clone();
         move || {
-            match check_python() {
+            // python: hard requirement — blocks "Weiter" if missing
+            let python_ok = match check_python() {
                 Ok(version) => {
-                    status.set_text(&format!("✓ Python {version} mit venv-Modul gefunden."));
-                    instructions.set_text("");
-                    next_btn.set_sensitive(true);
+                    python_row.set(
+                        Status::Ok,
+                        &format!("Python <b>{version}</b> mit <tt>venv</tt>-Modul gefunden."),
+                    );
+                    true
                 }
                 Err(reason) => {
-                    status.set_text(&format!("✗ {reason}"));
-                    instructions.set_markup(&install_instructions_markup());
-                    next_btn.set_sensitive(false);
+                    python_row.set(Status::Error, &format!("<b>Python:</b> {reason}"));
+                    false
                 }
+            };
+            // optional CLI tools: warning / info only, doesn't block setup
+            if which("xdotool") {
+                xdotool_row.set(
+                    Status::Ok,
+                    "<tt>xdotool</tt> gefunden — Auto-Paste &amp; Fenster-Positionierung verfügbar.",
+                );
+            } else {
+                xdotool_row.set(
+                    Status::Warn,
+                    "<tt>xdotool</tt> nicht gefunden — Auto-Paste &amp; Fenster-Positionierung deaktiviert.",
+                );
+            }
+            if which("ydotool") {
+                ydotool_row.set(
+                    Status::Ok,
+                    "<tt>ydotool</tt> gefunden — Text-Injection unter Wayland möglich.",
+                );
+            } else {
+                ydotool_row.set(
+                    Status::Info,
+                    "<tt>ydotool</tt> nicht gefunden — nur relevant für native Wayland-Apps.",
+                );
+            }
+
+            if python_ok {
+                instructions.set_text("");
+                next_btn.set_sensitive(true);
+            } else {
+                instructions.set_markup(&install_instructions_markup());
+                next_btn.set_sensitive(false);
             }
         }
     };
@@ -157,6 +215,85 @@ fn check_python() -> Result<String, String> {
         return Err("python3 ist da, aber das venv-Modul fehlt.".into());
     }
     Ok(version)
+}
+
+/// Visual state of a single requirement row.
+#[derive(Clone, Copy)]
+enum Status {
+    Ok,
+    Warn,
+    Info,
+    Error,
+}
+
+impl Status {
+    fn icon(self) -> &'static str {
+        match self {
+            Status::Ok => "✓",
+            Status::Warn => "⚠",
+            Status::Info => "ℹ",
+            Status::Error => "✗",
+        }
+    }
+    fn color(self) -> &'static str {
+        match self {
+            Status::Ok => "#26a269",    // GNOME green-3
+            Status::Warn => "#e5a50a",  // GNOME yellow-4
+            Status::Info => "#9a9996",  // GNOME light-3
+            Status::Error => "#c01c28", // GNOME red-4
+        }
+    }
+}
+
+/// A single horizontal row "[colored icon]  [wrapping text]" used in the
+/// system-check list. Cloning the wrapper just clones the inner widget refs
+/// (cheap GObject ref-counting), so closures can mutate the row at will.
+#[derive(Clone)]
+struct StatusRow {
+    widget: GtkBox,
+    icon: Label,
+    text: Label,
+}
+
+impl StatusRow {
+    fn new() -> Self {
+        let widget = GtkBox::new(Orientation::Horizontal, 10);
+        widget.set_valign(gtk4::Align::Start);
+
+        let icon = Label::new(None);
+        icon.set_xalign(0.5);
+        icon.set_valign(gtk4::Align::Start);
+        // Reserve a stable column width so wrapping text aligns cleanly
+        // across rows regardless of which glyph is shown.
+        icon.set_width_chars(2);
+
+        let text = Label::new(Some("…"));
+        text.set_xalign(0.0);
+        text.set_wrap(true);
+        text.set_hexpand(true);
+        text.set_use_markup(true);
+
+        widget.append(&icon);
+        widget.append(&text);
+        StatusRow { widget, icon, text }
+    }
+
+    fn set(&self, status: Status, markup_text: &str) {
+        self.icon.set_markup(&format!(
+            "<span foreground='{}' weight='bold' size='large'>{}</span>",
+            status.color(),
+            status.icon()
+        ));
+        self.text.set_markup(markup_text);
+    }
+}
+
+fn which(cmd: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {cmd} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn parse_major_minor(s: &str) -> Option<(u32, u32)> {
@@ -238,6 +375,7 @@ fn build_page_install(stack: &Stack) -> GtkBox {
         let next_btn = next_btn.clone();
         let spinner = spinner.clone();
         let log_buffer = log_buffer.clone();
+        let log_view = log_view.clone();
         start_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
             spinner.set_visible(true);
@@ -247,6 +385,7 @@ fn build_page_install(stack: &Stack) -> GtkBox {
             spawn_install_thread(tx);
 
             let log_buffer = log_buffer.clone();
+            let log_view = log_view.clone();
             let spinner = spinner.clone();
             let next_btn = next_btn.clone();
             let start_btn = btn.clone();
@@ -255,13 +394,13 @@ fn build_page_install(stack: &Stack) -> GtkBox {
                 let mut had_error = false;
                 while let Ok(m) = rx.try_recv() {
                     match m {
-                        InstallMsg::Line(line) => append_log(&log_buffer, &line),
+                        InstallMsg::Line(line) => append_log(&log_buffer, &log_view, &line),
                         InstallMsg::Done => {
                             done = true;
                             break;
                         }
                         InstallMsg::Error(e) => {
-                            append_log(&log_buffer, &format!("\n✗ FEHLER: {e}"));
+                            append_log(&log_buffer, &log_view, &format!("\n✗ FEHLER: {e}"));
                             had_error = true;
                             done = true;
                             break;
@@ -275,7 +414,12 @@ fn build_page_install(stack: &Stack) -> GtkBox {
                         start_btn.set_label("Erneut versuchen");
                         start_btn.set_sensitive(true);
                     } else {
-                        append_log(&log_buffer, "\n✓ Einrichtung abgeschlossen.");
+                        append_log(&log_buffer, &log_view, "");
+                        append_log(
+                            &log_buffer,
+                            &log_view,
+                            "✓ Successfully installed vooox dependencies.",
+                        );
                         next_btn.set_sensitive(true);
                     }
                     glib::ControlFlow::Break
@@ -388,12 +532,22 @@ fn spawn_install_thread(tx: mpsc::Sender<InstallMsg>) {
     });
 }
 
-fn append_log(buf: &TextBuffer, line: &str) {
+fn append_log(buf: &TextBuffer, view: &TextView, line: &str) {
     let mut iter = buf.end_iter();
     if buf.char_count() > 0 {
         buf.insert(&mut iter, "\n");
     }
+    // Place the scroll target at the START of the line we're about to
+    // insert, with left-gravity so it stays put when text gets inserted
+    // after it. Scrolling to this mark with xalign=0 keeps the viewport's
+    // horizontal position pinned to the start of the line — without this
+    // the TextView would happily scroll right to follow the buffer's end
+    // cursor, hiding the beginning of long pip lines.
+    let line_start = buf.create_mark(None, &iter, true);
     buf.insert(&mut iter, line);
+
+    view.scroll_to_mark(&line_start, 0.0, true, 0.0, 1.0);
+    buf.delete_mark(&line_start);
 }
 
 // ── page 3: model download ───────────────────────────────────────────────

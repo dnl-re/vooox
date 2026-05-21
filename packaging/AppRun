@@ -1,7 +1,57 @@
 #!/bin/sh
 # Entry point for the vooox AppImage.
-# AppImage runtime sets $APPDIR; we resolve our own dir defensively in case
-# the script is run directly out of an extracted AppDir.
+#
+# Before exec'ing the binary we sanity-check that the dynamic linker can
+# resolve every shared library it needs (GTK4 is the load-bearing one — if
+# it's missing the binary won't even reach main(), so we can't show an
+# in-app error). If anything is missing we surface a graphical dialog via
+# zenity → notify-send → stderr fallback chain and exit non-zero.
+
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="$HERE/usr/bin:$PATH"
-exec "$HERE/usr/bin/vooox" "$@"
+BIN="$HERE/usr/bin/vooox"
+
+# ── dependency check ─────────────────────────────────────────────────────
+
+missing="$(ldd "$BIN" 2>/dev/null | awk '/not found/ {print $1}' | sort -u)"
+
+if [ -n "$missing" ]; then
+    # Distro-specific install hint via /etc/os-release
+    distro_id="$(. /etc/os-release 2>/dev/null && echo "${ID:-unknown}")"
+    case "$distro_id" in
+        debian|ubuntu|linuxmint|pop|elementary)
+            hint="sudo apt install libgtk-4-1 libadwaita-1-0 xdotool"
+            ;;
+        fedora|rhel|centos|rocky|almalinux)
+            hint="sudo dnf install gtk4 libadwaita xdotool"
+            ;;
+        arch|manjaro|endeavouros)
+            hint="sudo pacman -S gtk4 libadwaita xdotool"
+            ;;
+        opensuse*|sles)
+            hint="sudo zypper install libgtk-4-1 libadwaita-1-0 xdotool"
+            ;;
+        *)
+            hint="Installiere GTK4 und xdotool über deinen Paketmanager."
+            ;;
+    esac
+
+    msg="vooox kann nicht gestartet werden, weil folgende System-Bibliotheken fehlen:
+
+$missing
+
+Installiere sie z. B. so:
+$hint"
+
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --width=520 --title="vooox — fehlende Abhängigkeiten" --text="$msg"
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical "vooox — fehlende Abhängigkeiten" "$missing"
+        printf '%s\n' "$msg" >&2
+    else
+        printf '%s\n' "$msg" >&2
+    fi
+    exit 1
+fi
+
+exec "$BIN" "$@"
