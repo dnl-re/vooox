@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="vooox.gif" alt="vooox demo" width="228" height="66"/>
+</p>
+
 # vooox
 
 Lokale Speech-to-Text-Desktop-App für Linux. Globalen Shortcut drücken, sprechen, nochmal drücken — der transkribierte Text wird direkt an der Cursor-Position eingefügt. Alles läuft offline auf dem eigenen Rechner.
