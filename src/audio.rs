@@ -8,41 +8,48 @@ pub struct DeviceInfo {
     pub device: Device,
 }
 
-/// Reads /proc/asound/cards and returns short_name → full_name mapping.
-/// Example: "J380" → "Jabra Link 380"
-fn alsa_card_names() -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    if let Ok(content) = std::fs::read_to_string("/proc/asound/cards") {
-        for line in content.lines() {
-            let line = line.trim();
-            if let (Some(bs), Some(be)) = (line.find('['), line.find(']')) {
-                let short = line[bs + 1..be].trim().to_string();
-                if let Some(dash) = line.rfind(" - ") {
-                    let full = line[dash + 3..].trim().to_string();
-                    map.insert(short, full);
-                }
-            }
-        }
-    }
-    map
+pub struct CapturedAudio {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
-fn make_display_name(name: &str, cards: &std::collections::HashMap<String, String>) -> String {
-    match name {
-        "default" => "Standard (ALSA)".to_string(),
-        "pulse" => "PulseAudio / PipeWire (folgt Systemeinstellung)".to_string(),
-        "pipewire" => "PipeWire".to_string(),
-        _ => {
-            if let Some(card_part) = name.split("CARD=").nth(1) {
-                let short = card_part.split(',').next().unwrap_or(card_part);
-                let prefix = name.split(':').next().unwrap_or("");
-                let full = cards.get(short).map(|s| s.as_str()).unwrap_or(short);
-                format!("{full} ({prefix})")
-            } else {
-                name.to_string()
-            }
-        }
-    }
+// ── Device listing ────────────────────────────────────────────────────────
+
+pub fn list_input_devices() -> Vec<DeviceInfo> {
+    let cards = alsa_card_names();
+    let mut devices = collect_input_devices(&cards);
+    sort_devices_by_preference(&mut devices);
+    devices
+}
+
+fn collect_input_devices(cards: &std::collections::HashMap<String, String>) -> Vec<DeviceInfo> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|iter| {
+            iter.filter_map(|d| {
+                let name = d.name().unwrap_or_else(|_| "Unknown".into());
+                if should_skip_device(&name) {
+                    return None;
+                }
+                let display = make_display_name(&name, cards);
+                Some(DeviceInfo { name, display, device: d })
+            })
+            .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn sort_devices_by_preference(devices: &mut Vec<DeviceInfo>) {
+    devices.sort_by_key(|d| match d.name.as_str() {
+        "pulse" => 0u8,
+        "default" => 1,
+        _ => 2,
+    });
+}
+
+fn should_skip_device(name: &str) -> bool {
+    !is_useful_input_device(name)
 }
 
 /// Keep only the minimal useful set: one entry per physical card plus pulse/pipewire.
@@ -52,31 +59,47 @@ fn is_useful_input_device(name: &str) -> bool {
         || name.starts_with("sysdefault:CARD=")
 }
 
-pub fn list_input_devices() -> Vec<DeviceInfo> {
-    let host = cpal::default_host();
-    let cards = alsa_card_names();
-    let mut devices: Vec<DeviceInfo> = host
-        .input_devices()
-        .map(|iter| {
-            iter.filter_map(|d| {
-                let name = d.name().unwrap_or_else(|_| "Unknown".into());
-                if !is_useful_input_device(&name) {
-                    return None;
-                }
-                let display = make_display_name(&name, &cards);
-                Some(DeviceInfo { name, display, device: d })
-            })
-            .collect()
-        })
-        .unwrap_or_default();
+/// Reads /proc/asound/cards and returns short_name → full_name mapping.
+/// Example: "J380" → "Jabra Link 380"
+fn alsa_card_names() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(content) = std::fs::read_to_string("/proc/asound/cards") else {
+        return map;
+    };
+    for line in content.lines() {
+        if let Some((short, full)) = parse_alsa_card_line(line.trim()) {
+            map.insert(short, full);
+        }
+    }
+    map
+}
 
-    // sort: pulse first (PipeWire system default), then "default", then rest
-    devices.sort_by_key(|d| match d.name.as_str() {
-        "pulse" => 0u8,
-        "default" => 1,
-        _ => 2,
-    });
-    devices
+fn parse_alsa_card_line(line: &str) -> Option<(String, String)> {
+    let bracket_start = line.find('[')?;
+    let bracket_end = line.find(']')?;
+    let short = line[bracket_start + 1..bracket_end].trim().to_string();
+    let dash_pos = line.rfind(" - ")?;
+    let full = line[dash_pos + 3..].trim().to_string();
+    Some((short, full))
+}
+
+fn make_display_name(name: &str, cards: &std::collections::HashMap<String, String>) -> String {
+    match name {
+        "default" => "Standard (ALSA)".to_string(),
+        "pulse" => "PulseAudio / PipeWire (folgt Systemeinstellung)".to_string(),
+        "pipewire" => "PipeWire".to_string(),
+        _ => make_display_name_for_alsa_device(name, cards),
+    }
+}
+
+fn make_display_name_for_alsa_device(name: &str, cards: &std::collections::HashMap<String, String>) -> String {
+    let Some(card_part) = name.split("CARD=").nth(1) else {
+        return name.to_string();
+    };
+    let short_id = card_part.split(',').next().unwrap_or(card_part);
+    let device_type = name.split(':').next().unwrap_or("");
+    let full_name = cards.get(short_id).map(|s| s.as_str()).unwrap_or(short_id);
+    format!("{full_name} ({device_type})")
 }
 
 pub fn default_input_device() -> Option<Device> {
@@ -99,56 +122,15 @@ pub struct Recorder {
 impl Recorder {
     pub fn start(device: &Device) -> Result<Self, Box<dyn std::error::Error>> {
         let supported = device.default_input_config()?;
-        let sample_rate = supported.sample_rate(); // SampleRate = u32 in cpal 0.17
+        let sample_rate = supported.sample_rate();
         let channels = supported.channels();
         let sample_format = supported.sample_format();
-        // convert to StreamConfig before branching so we don't try to move in multiple arms
         let cfg: StreamConfig = supported.into();
 
-        let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-        let samples_clone = Arc::clone(&samples);
-        let err_fn = |e| eprintln!("[audio] stream error: {e}");
-
-        let stream = match sample_format {
-            SampleFormat::F32 => {
-                device.build_input_stream(
-                    &cfg,
-                    move |data: &[f32], _| {
-                        samples_clone.lock().unwrap().extend_from_slice(data);
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
-            SampleFormat::I16 => {
-                device.build_input_stream(
-                    &cfg,
-                    move |data: &[i16], _| {
-                        let mut buf = samples_clone.lock().unwrap();
-                        buf.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
-            SampleFormat::U16 => {
-                device.build_input_stream(
-                    &cfg,
-                    move |data: &[u16], _| {
-                        let mut buf = samples_clone.lock().unwrap();
-                        buf.extend(
-                            data.iter()
-                                .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0),
-                        );
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
-            f => return Err(format!("unsupported sample format: {f:?}").into()),
-        };
+        let buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let stream = build_recording_stream_for_format(device, &cfg, sample_format, Arc::clone(&buffer))?;
         stream.play()?;
-        Ok(Recorder { _stream: stream, samples, sample_rate, channels })
+        Ok(Recorder { _stream: stream, samples: buffer, sample_rate, channels })
     }
 
     /// Number of samples captured so far (without stopping the stream).
@@ -157,9 +139,9 @@ impl Recorder {
     }
 
     /// Clone all samples captured so far without stopping the stream.
-    pub fn peek_samples(&self) -> (Vec<f32>, u32, u16) {
+    pub fn peek_samples(&self) -> CapturedAudio {
         let samples = self.samples.lock().unwrap().clone();
-        (samples, self.sample_rate, self.channels)
+        CapturedAudio { samples, sample_rate: self.sample_rate, channels: self.channels }
     }
 
     pub fn stop_and_take(self) -> Vec<f32> {
@@ -169,6 +151,70 @@ impl Recorder {
             .map(|m| m.into_inner().unwrap())
             .unwrap_or_default()
     }
+}
+
+fn build_recording_stream_for_format(
+    device: &Device,
+    cfg: &StreamConfig,
+    format: SampleFormat,
+    buffer: Arc<Mutex<Vec<f32>>>,
+) -> Result<Stream, Box<dyn std::error::Error>> {
+    let err_fn = |e| eprintln!("[audio] stream error: {e}");
+    let stream = match format {
+        SampleFormat::F32 => record_f32_samples(device, cfg, buffer, err_fn)?,
+        SampleFormat::I16 => record_i16_samples(device, cfg, buffer, err_fn)?,
+        SampleFormat::U16 => record_u16_samples(device, cfg, buffer, err_fn)?,
+        f => return Err(format!("unsupported sample format: {f:?}").into()),
+    };
+    Ok(stream)
+}
+
+fn record_f32_samples(
+    device: &Device,
+    cfg: &StreamConfig,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    err_fn: impl Fn(cpal::StreamError) + Send + 'static,
+) -> Result<Stream, cpal::BuildStreamError> {
+    device.build_input_stream(
+        cfg,
+        move |data: &[f32], _| buffer.lock().unwrap().extend_from_slice(data),
+        err_fn,
+        None,
+    )
+}
+
+fn record_i16_samples(
+    device: &Device,
+    cfg: &StreamConfig,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    err_fn: impl Fn(cpal::StreamError) + Send + 'static,
+) -> Result<Stream, cpal::BuildStreamError> {
+    device.build_input_stream(
+        cfg,
+        move |data: &[i16], _| {
+            buffer.lock().unwrap().extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
+        },
+        err_fn,
+        None,
+    )
+}
+
+fn record_u16_samples(
+    device: &Device,
+    cfg: &StreamConfig,
+    buffer: Arc<Mutex<Vec<f32>>>,
+    err_fn: impl Fn(cpal::StreamError) + Send + 'static,
+) -> Result<Stream, cpal::BuildStreamError> {
+    device.build_input_stream(
+        cfg,
+        move |data: &[u16], _| {
+            buffer.lock().unwrap().extend(
+                data.iter().map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0),
+            );
+        },
+        err_fn,
+        None,
+    )
 }
 
 // ── Level meter ───────────────────────────────────────────────────────────
@@ -184,34 +230,7 @@ impl LevelMeter {
         let sample_format = supported.sample_format();
         let cfg: StreamConfig = supported.into();
         let level: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
-        let level_clone = Arc::clone(&level);
-        let err_fn = |e| eprintln!("[level] stream error: {e}");
-
-        let compute_rms = move |samples: &[f32]| {
-            if samples.is_empty() {
-                return;
-            }
-            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-            *level_clone.lock().unwrap() = (sum_sq / samples.len() as f32).sqrt();
-        };
-
-        let stream = match sample_format {
-            SampleFormat::F32 => {
-                device.build_input_stream(&cfg, move |d: &[f32], _| compute_rms(d), err_fn, None)?
-            }
-            SampleFormat::I16 => {
-                device.build_input_stream(
-                    &cfg,
-                    move |d: &[i16], _| {
-                        let v: Vec<f32> = d.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                        compute_rms(&v);
-                    },
-                    err_fn,
-                    None,
-                )?
-            }
-            _ => device.build_input_stream(&cfg, move |_: &[f32], _| {}, err_fn, None)?,
-        };
+        let stream = build_level_stream_for_format(device, &cfg, sample_format, Arc::clone(&level))?;
         stream.play()?;
         Ok(LevelMeter { _stream: stream, level })
     }
@@ -219,6 +238,49 @@ impl LevelMeter {
     pub fn get(&self) -> f32 {
         *self.level.lock().unwrap()
     }
+}
+
+fn build_level_stream_for_format(
+    device: &Device,
+    cfg: &StreamConfig,
+    format: SampleFormat,
+    level: Arc<Mutex<f32>>,
+) -> Result<Stream, Box<dyn std::error::Error>> {
+    let err_fn = |e| eprintln!("[level] stream error: {e}");
+    let stream = match format {
+        SampleFormat::F32 => {
+            device.build_input_stream(cfg, move |d: &[f32], _| update_rms_level(d, &level), err_fn, None)?
+        }
+        SampleFormat::I16 => {
+            device.build_input_stream(
+                cfg,
+                move |d: &[i16], _| {
+                    let floats: Vec<f32> = d.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    update_rms_level(&floats, &level);
+                },
+                err_fn,
+                None,
+            )?
+        }
+        _ => device.build_input_stream(cfg, move |_: &[f32], _| {}, err_fn, None)?,
+    };
+    Ok(stream)
+}
+
+fn update_rms_level(samples: &[f32], level: &Arc<Mutex<f32>>) {
+    if samples.is_empty() {
+        return;
+    }
+    let sum_of_squares: f32 = samples.iter().map(|s| s * s).sum();
+    *level.lock().unwrap() = (sum_of_squares / samples.len() as f32).sqrt();
+}
+
+fn compute_rms_level(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_of_squares: f32 = samples.iter().map(|s| s * s).sum();
+    (sum_of_squares / samples.len() as f32).sqrt()
 }
 
 // ── WAV encoding ──────────────────────────────────────────────────────────
@@ -307,5 +369,20 @@ mod tests {
     fn to_mono_passthrough() {
         let samples = vec![0.1f32, 0.2, 0.3];
         assert_eq!(to_mono(&samples, 1), samples);
+    }
+
+    #[test]
+    fn rms_level_of_silence_is_zero() {
+        assert_eq!(compute_rms_level(&[]), 0.0);
+        assert_eq!(compute_rms_level(&[0.0, 0.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn rms_level_of_full_scale_sine() {
+        let samples: Vec<f32> = (0..1000)
+            .map(|i| (2.0 * std::f32::consts::PI * i as f32 / 100.0).sin())
+            .collect();
+        let rms = compute_rms_level(&samples);
+        assert!((rms - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01);
     }
 }
