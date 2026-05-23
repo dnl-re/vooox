@@ -83,29 +83,31 @@ impl Default for Config {
     }
 }
 
-fn config_path() -> PathBuf {
-    dirs_path().join("config.toml")
-}
+// ── Paths ─────────────────────────────────────────────────────────────────
 
-fn dirs_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".config")
-        });
-    base.join("vooox")
+fn config_path() -> PathBuf {
+    vooox_config_dir().join("config.toml")
 }
 
 fn autostart_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".config")
-        });
-    base.join("autostart").join("vooox.desktop")
+    xdg_config_home().join("autostart").join("vooox.desktop")
 }
+
+fn vooox_config_dir() -> PathBuf {
+    xdg_config_home().join("vooox")
+}
+
+fn xdg_config_home() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".config"))
+}
+
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+}
+
+// ── Load / Save ───────────────────────────────────────────────────────────
 
 impl Config {
     pub fn load() -> Self {
@@ -118,7 +120,7 @@ impl Config {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        let dir = dirs_path();
+        let dir = vooox_config_dir();
         fs::create_dir_all(&dir)?;
         let text = toml::to_string_pretty(self).expect("config serialization");
         fs::write(config_path(), text)?;
@@ -126,32 +128,45 @@ impl Config {
     }
 
     fn sync_autostart(&self) -> std::io::Result<()> {
-        let path = autostart_path();
         if self.autostart {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            // Inside an AppImage, current_exe() points into the FUSE mount
-            // (/tmp/.mount_…/usr/bin/vooox) which disappears on exit. The
-            // AppImage runtime sets $APPIMAGE to the stable .AppImage path
-            // for exactly this purpose.
-            let exe = std::env::var("APPIMAGE").unwrap_or_else(|_| {
-                std::env::current_exe()
-                    .unwrap_or_else(|_| PathBuf::from("vooox"))
-                    .display()
-                    .to_string()
-            });
-            let entry = format!(
-                "[Desktop Entry]\nType=Application\nName=vooox\nExec={exe}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n"
-            );
-            let mut f = fs::File::create(&path)?;
-            f.write_all(entry.as_bytes())?;
-        } else if path.exists() {
-            fs::remove_file(&path)?;
+            self.create_autostart_entry()
+        } else {
+            remove_autostart_entry_if_present()
         }
-        Ok(())
     }
 
+    fn create_autostart_entry(&self) -> std::io::Result<()> {
+        let path = autostart_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let exe = resolve_current_executable_path();
+        let entry = format!(
+            "[Desktop Entry]\nType=Application\nName=vooox\nExec={exe}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n"
+        );
+        let mut f = fs::File::create(&path)?;
+        f.write_all(entry.as_bytes())
+    }
+}
+
+fn remove_autostart_entry_if_present() -> std::io::Result<()> {
+    let path = autostart_path();
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+fn resolve_current_executable_path() -> String {
+    // Inside an AppImage, current_exe() points into the FUSE mount
+    // (/tmp/.mount_…/usr/bin/vooox) which disappears on exit. The
+    // AppImage runtime sets $APPIMAGE to the stable .AppImage path.
+    std::env::var("APPIMAGE").unwrap_or_else(|_| {
+        std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("vooox"))
+            .display()
+            .to_string()
+    })
 }
 
 #[cfg(test)]
