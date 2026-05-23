@@ -1,25 +1,14 @@
 mod audio;
-mod config;
-mod dictation_panel;
-mod gpu;
-mod history;
-mod history_window;
-mod paths;
-mod settings;
-mod setup_window;
-mod shortcuts;
-mod sidecar;
-mod tray;
-mod whisper_client;
-mod whisper_models;
-mod window_state;
-mod x11_window;
+mod storage;
+mod system;
+mod transcription;
+mod ui;
 
-use crate::config::Config;
-use crate::dictation_panel::DictationPanel;
-use crate::history::History;
-use crate::tray::AppCommand;
-use crate::whisper_client::WhisperClient;
+use crate::storage::config::Config;
+use crate::storage::history::History;
+use crate::transcription::whisper_client::WhisperClient;
+use crate::ui::dictation_panel::DictationPanel;
+use crate::ui::tray::AppCommand;
 use crossbeam_channel::bounded;
 use glib;
 use gtk4::prelude::*;
@@ -32,13 +21,13 @@ type StreamRx = crossbeam_channel::Receiver<Option<String>>;
 // ── headless test-pipeline mode ───────────────────────────────────────────
 
 async fn run_test_pipeline_async(wav_path: &str) -> i32 {
-    let sidecar_process = match sidecar::start_whisper_sidecar() {
+    let sidecar_process = match transcription::sidecar::start_whisper_sidecar() {
         Ok(x) => x,
         Err(e) => { eprintln!("sidecar error: {e}"); return 1; }
     };
     let port = sidecar_process.port;
     let mut child = sidecar_process.child;
-    if let Err(e) = whisper_client::wait_for_ready(port, 60).await {
+    if let Err(e) = transcription::whisper_client::wait_for_ready(port, 60).await {
         eprintln!("{e}");
         let _ = child.kill();
         return 1;
@@ -77,9 +66,9 @@ fn main() -> glib::ExitCode {
         .build();
 
     app.connect_activate(move |app| {
-        if !skip_setup && !paths::setup_is_complete() {
+        if !skip_setup && !storage::paths::setup_is_complete() {
             let app_for_done = app.clone();
-            setup_window::show(app, move || build_ui(&app_for_done));
+            ui::setup_window::show(app, move || build_ui(&app_for_done));
         } else {
             build_ui(app);
         }
@@ -94,7 +83,7 @@ fn build_ui(app: &Application) {
 
     apply_force_cpu_setting(&config.borrow());
 
-    let sidecar_process = match sidecar::start_whisper_sidecar() {
+    let sidecar_process = match transcription::sidecar::start_whisper_sidecar() {
         Ok(x) => x,
         Err(e) => {
             eprintln!("[main] sidecar failed: {e}");
@@ -105,11 +94,11 @@ fn build_ui(app: &Application) {
     let port = sidecar_process.port;
     let sidecar = sidecar_process.child;
 
-    let (shortcut_tx, shortcut_rx) = bounded::<shortcuts::ShortcutEvent>(16);
+    let (shortcut_tx, shortcut_rx) = bounded::<system::shortcuts::ShortcutEvent>(16);
     let (tray_tx, tray_rx) = bounded::<AppCommand>(8);
 
     start_shortcut_listener(&config.borrow(), shortcut_tx);
-    let tray_handle = tray::spawn_tray(tray_tx.clone(), config.borrow().panel_mode);
+    let tray_handle = ui::tray::spawn_tray(tray_tx.clone(), config.borrow().panel_mode);
 
     let history = Rc::new(RefCell::new(History::load()));
     let panel = Rc::new(DictationPanel::new(app, tray_tx.clone(), Rc::clone(&config)));
@@ -141,14 +130,12 @@ fn build_ui(app: &Application) {
         glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
             while let Ok(ev) = shortcut_rx.try_recv() {
                 match ev {
-                    shortcuts::ShortcutEvent::Press => {
-                        // Start a new hold window regardless of toggle/PTT path
+                    system::shortcuts::ShortcutEvent::Press => {
                         let this_hold = hold_id.get().wrapping_add(1);
                         hold_id.set(this_hold);
                         ptt_active.set(false);
 
                         if *recording.borrow() {
-                            // second press = toggle stop
                             panel.arm_auto_paste(config.borrow().auto_paste_toggle);
                             stop_recording(
                                 Rc::clone(&recorder),
@@ -168,7 +155,6 @@ fn build_ui(app: &Application) {
                                 tray_handle.clone(),
                                 port,
                             );
-                            // Schedule PTT-threshold visual switch if enabled.
                             let cfg_snap = config.borrow().clone();
                             if cfg_snap.push_to_talk_enabled {
                                 let threshold = std::time::Duration::from_millis(
@@ -194,8 +180,7 @@ fn build_ui(app: &Application) {
                             );
                         }
                     }
-                    shortcuts::ShortcutEvent::Release => {
-                        // Invalidate any pending threshold timer for this hold
+                    system::shortcuts::ShortcutEvent::Release => {
                         hold_id.set(hold_id.get().wrapping_add(1));
                         if ptt_active.get() && *recording.borrow() {
                             ptt_active.set(false);
@@ -219,14 +204,14 @@ fn build_ui(app: &Application) {
             while let Ok(cmd) = tray_rx.try_recv() {
                 match cmd {
                     AppCommand::OpenSettings => {
-                        settings::SettingsWindow::new(&app_clone, Rc::clone(&config), port)
+                        ui::settings::SettingsWindow::new(&app_clone, Rc::clone(&config), port)
                             .show();
                     }
                     AppCommand::ShowPanel => {
                         panel.present();
                     }
                     AppCommand::OpenHistory => {
-                        history_window::open(&app_clone, Rc::clone(&history));
+                        ui::history_window::open(&app_clone, Rc::clone(&history));
                     }
                     AppCommand::HidePanel => {
                         panel.hide();
@@ -243,7 +228,7 @@ fn build_ui(app: &Application) {
                         }
                         panel.apply_mode(m);
                         if let Some(ref h) = tray_handle {
-                            tray::set_panel_mode(h, m);
+                            ui::tray::set_panel_mode(h, m);
                         }
                     }
                     AppCommand::SetModel(m) => {
@@ -285,7 +270,6 @@ fn build_ui(app: &Application) {
 // ── setup helpers ─────────────────────────────────────────────────────────
 
 fn apply_force_cpu_setting(cfg: &Config) {
-    // Force-CPU-Toggle wirkt nur beim Sidecar-Start: hier ans env weitergeben.
     if cfg.force_cpu {
         std::env::set_var("VOOOX_FORCE_CPU", "1");
     } else {
@@ -293,10 +277,13 @@ fn apply_force_cpu_setting(cfg: &Config) {
     }
 }
 
-fn start_shortcut_listener(cfg: &Config, shortcut_tx: crossbeam_channel::Sender<shortcuts::ShortcutEvent>) {
+fn start_shortcut_listener(
+    cfg: &Config,
+    shortcut_tx: crossbeam_channel::Sender<system::shortcuts::ShortcutEvent>,
+) {
     let shortcut_str = cfg.shortcut.clone();
-    match shortcuts::Shortcut::parse(&shortcut_str) {
-        Ok(sc) => shortcuts::spawn_listener(sc, shortcut_tx),
+    match system::shortcuts::Shortcut::parse(&shortcut_str) {
+        Ok(sc) => system::shortcuts::spawn_listener(sc, shortcut_tx),
         Err(e) => eprintln!("[shortcuts] invalid shortcut '{shortcut_str}': {e}"),
     }
 }
@@ -308,7 +295,7 @@ fn push_saved_config_to_sidecar_once_ready(port: u16, cfg: &Config) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async move {
-            match whisper_client::wait_for_ready(port, 60).await {
+            match transcription::whisper_client::wait_for_ready(port, 60).await {
                 Ok(_) => {
                     let client = WhisperClient::new(port);
                     if let Err(e) = client.set_config(&model, &language).await {
@@ -339,7 +326,7 @@ fn start_recording(
     recorder: Rc<RefCell<Option<audio::Recorder>>>,
     recording: Rc<RefCell<bool>>,
     panel: Rc<DictationPanel>,
-    tray_handle: Option<ksni::blocking::Handle<tray::VoooxTray>>,
+    tray_handle: Option<ksni::blocking::Handle<ui::tray::VoooxTray>>,
     port: u16,
 ) {
     match audio::Recorder::start(dev) {
@@ -349,7 +336,7 @@ fn start_recording(
             *recording.borrow_mut() = true;
             panel.show_recording(dev);
             if let Some(ref h) = tray_handle {
-                tray::set_recording(h, true);
+                ui::tray::set_recording(h, true);
             }
             spawn_streaming_timer(Rc::clone(&recorder), Rc::clone(&recording), Rc::clone(&panel), port);
         }
@@ -361,7 +348,7 @@ fn stop_recording(
     recorder: Rc<RefCell<Option<audio::Recorder>>>,
     recording: Rc<RefCell<bool>>,
     panel: Rc<DictationPanel>,
-    tray_handle: Option<ksni::blocking::Handle<tray::VoooxTray>>,
+    tray_handle: Option<ksni::blocking::Handle<ui::tray::VoooxTray>>,
     cfg: Config,
     history: Rc<RefCell<History>>,
     port: u16,
@@ -369,7 +356,7 @@ fn stop_recording(
     *recording.borrow_mut() = false;
     panel.show_processing();
     if let Some(ref h) = tray_handle {
-        tray::set_recording(h, false);
+        ui::tray::set_recording(h, false);
     }
 
     if let Some(rec) = recorder.borrow_mut().take() {
@@ -406,8 +393,6 @@ fn stop_recording(
 
 // ── timer helpers ─────────────────────────────────────────────────────────
 
-/// Spawns a 200ms timer that sends partial audio to Whisper during recording
-/// and updates the panel with a live preview.
 fn spawn_streaming_timer(
     recorder: Rc<RefCell<Option<audio::Recorder>>>,
     recording: Rc<RefCell<bool>>,
@@ -422,7 +407,6 @@ fn spawn_streaming_timer(
             return glib::ControlFlow::Break;
         }
 
-        // collect result from any in-flight transcription call
         let got: Option<String> = {
             let mut rx_opt = stream_rx.borrow_mut();
             if let Some(ref rx) = *rx_opt {
@@ -442,7 +426,6 @@ fn spawn_streaming_timer(
             }
         }
 
-        // start a new transcription call if enough new audio has accumulated
         if stream_rx.borrow().is_none() {
             let maybe_wav = {
                 let rec_opt = recorder.borrow();
@@ -475,7 +458,6 @@ fn spawn_streaming_timer(
     });
 }
 
-/// Spawns a 50ms timer that polls Whisper segments and streams them into the panel.
 fn spawn_segment_poll(
     seg_rx: crossbeam_channel::Receiver<Result<String, String>>,
     panel: Rc<DictationPanel>,
@@ -495,7 +477,7 @@ fn spawn_segment_poll(
                         *full_text.borrow_mut() = seg;
                     } else {
                         panel.append_segment(&seg);
-                        let to_push = dictation_panel::space_join(&full_text.borrow(), &seg);
+                        let to_push = ui::dictation_panel::space_join(&full_text.borrow(), &seg);
                         full_text.borrow_mut().push_str(&to_push);
                     }
                 }
@@ -533,6 +515,6 @@ fn show_error_dialog(app: &Application, msg: &str) {
     win.present();
     let w = win.clone();
     glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
-        x11_window::center_window_on_cursor_monitor(&w);
+        system::x11_window::center_window_on_cursor_monitor(&w);
     });
 }
