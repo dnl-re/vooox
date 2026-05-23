@@ -8,6 +8,16 @@ use glib::object::Cast;
 use gtk4::prelude::*;
 use std::process::Command;
 
+// ── Geometry type ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct Geometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 // ── xdotool I/O ────────────────────────────────────────────────────────────
 
 pub fn cursor_position() -> Option<(i32, i32)> {
@@ -36,37 +46,39 @@ pub fn activate_window(xid: u64) {
         .status();
 }
 
-/// Center the given window on the monitor that currently holds the mouse
-/// cursor. Falls back silently if cursor or monitor lookup fails.
+/// Center the given window on the monitor that currently holds the mouse cursor.
+/// Falls back silently if cursor or monitor lookup fails.
 pub fn center_window_on_cursor_monitor(window: &gtk4::ApplicationWindow) {
-    use gtk4::prelude::*;
     let Some((cx, cy)) = cursor_position() else { return };
     let Some(mon) = monitor_containing(cx, cy) else { return };
     let Some(xid) = window_xid(window) else { return };
 
-    let (mon_x, mon_y, mon_w, mon_h) = monitor_geometry_physical(&mon);
+    let monitor = monitor_geometry_physical(&mon);
+    let window_size = logical_window_size_in_physical_pixels(window);
+    let centered = center_rect_on_monitor(&window_size, &monitor);
+    move_window(xid, centered.x, centered.y);
+}
+
+fn logical_window_size_in_physical_pixels(window: &gtk4::ApplicationWindow) -> Geometry {
     let scale = window.scale_factor().max(1);
     let (default_w, default_h) = window.default_size();
-    let logical_w = if window.width() > 10 {
-        window.width()
-    } else if default_w > 0 {
-        default_w
-    } else {
-        600
-    };
-    let logical_h = if window.height() > 10 {
-        window.height()
-    } else if default_h > 0 {
-        default_h
-    } else {
-        400
-    };
-    let win_w = logical_w * scale;
-    let win_h = logical_h * scale;
+    let logical_w = best_available_width(window.width(), default_w);
+    let logical_h = best_available_height(window.height(), default_h);
+    Geometry { x: 0, y: 0, width: logical_w * scale, height: logical_h * scale }
+}
 
-    let x = mon_x + (mon_w - win_w) / 2;
-    let y = mon_y + (mon_h - win_h) / 2;
-    move_window(xid, x.max(mon_x), y.max(mon_y));
+fn best_available_width(current: i32, default: i32) -> i32 {
+    if current > 10 { current } else if default > 0 { default } else { 600 }
+}
+
+fn best_available_height(current: i32, default: i32) -> i32 {
+    if current > 10 { current } else if default > 0 { default } else { 400 }
+}
+
+fn center_rect_on_monitor(window: &Geometry, monitor: &Geometry) -> Geometry {
+    let x = (monitor.x + (monitor.width - window.width) / 2).max(monitor.x);
+    let y = (monitor.y + (monitor.height - window.height) / 2).max(monitor.y);
+    Geometry { x, y, width: window.width, height: window.height }
 }
 
 /// Returns the X11 WM_CLASS for the given window as `"instance class"`
@@ -85,18 +97,14 @@ pub fn window_class(xid: u64) -> Option<String> {
 fn parse_wm_class(xprop_line: &str) -> Option<String> {
     // expected: WM_CLASS(STRING) = "instance", "class"
     let rhs = xprop_line.split('=').nth(1)?;
-    let parts: Vec<String> = rhs
+    let quoted_parts: Vec<String> = rhs
         .split('"')
         .enumerate()
         .filter(|(i, _)| i % 2 == 1) // odd indices are inside quotes
         .map(|(_, s)| s.to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
+    if quoted_parts.is_empty() { None } else { Some(quoted_parts.join(" ")) }
 }
 
 pub fn focus_window(xid: &str) {
@@ -111,27 +119,27 @@ pub fn raise_window(xid: u64) {
         .status();
 }
 
-/// Returns (x, y, width, height) in X11 physical pixels.
-pub fn window_geometry(xid: u64) -> Option<(i32, i32, i32, i32)> {
+/// Returns window geometry in X11 physical pixels.
+pub fn window_geometry(xid: u64) -> Option<Geometry> {
     let out = Command::new("xdotool")
         .args(["getwindowgeometry", "--shell", &xid.to_string()])
         .output()
         .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
+    parse_geometry_from_xdotool_output(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_geometry_from_xdotool_output(text: &str) -> Option<Geometry> {
     let mut x = None;
     let mut y = None;
     let mut w = None;
     let mut h = None;
-    for line in s.lines() {
+    for line in text.lines() {
         if let Some(v) = line.strip_prefix("X=") { x = v.parse().ok(); }
         else if let Some(v) = line.strip_prefix("Y=") { y = v.parse().ok(); }
         else if let Some(v) = line.strip_prefix("WIDTH=") { w = v.parse().ok(); }
         else if let Some(v) = line.strip_prefix("HEIGHT=") { h = v.parse().ok(); }
     }
-    match (x, y, w, h) {
-        (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
-        _ => None,
-    }
+    Some(Geometry { x: x?, y: y?, width: w?, height: h? })
 }
 
 // ── GDK glue ───────────────────────────────────────────────────────────────
@@ -148,28 +156,30 @@ pub fn monitor_containing(x: i32, y: i32) -> Option<gtk4::gdk::Monitor> {
     let display = gtk4::gdk::Display::default()?;
     let monitors = display.monitors();
     for i in 0..monitors.n_items() {
-        let obj = monitors.item(i)?;
-        if let Ok(mon) = obj.downcast::<gtk4::gdk::Monitor>() {
-            let (px, py, pw, ph) = monitor_geometry_physical(&mon);
-            if x >= px && x < px + pw && y >= py && y < py + ph {
-                return Some(mon);
-            }
+        let mon = monitors.item(i)?.downcast::<gtk4::gdk::Monitor>().ok()?;
+        let geo = monitor_geometry_physical(&mon);
+        if point_is_inside_rect(x, y, &geo) {
+            return Some(mon);
         }
     }
     None
 }
 
+fn point_is_inside_rect(x: i32, y: i32, rect: &Geometry) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
 /// GDK reports monitor geometry in logical pixels; X11 windowmove takes
 /// physical pixels. Scale once here so callers can stay in physical space.
-pub fn monitor_geometry_physical(mon: &gtk4::gdk::Monitor) -> (i32, i32, i32, i32) {
+pub fn monitor_geometry_physical(mon: &gtk4::gdk::Monitor) -> Geometry {
     let geo = mon.geometry();
     let scale = mon.scale_factor().max(1);
-    (
-        geo.x() * scale,
-        geo.y() * scale,
-        geo.width() * scale,
-        geo.height() * scale,
-    )
+    Geometry {
+        x: geo.x() * scale,
+        y: geo.y() * scale,
+        width: geo.width() * scale,
+        height: geo.height() * scale,
+    }
 }
 
 // ── internal ───────────────────────────────────────────────────────────────
@@ -216,5 +226,15 @@ mod tests {
     fn parses_wm_class_missing() {
         assert_eq!(parse_wm_class("WM_CLASS:  not found.\n"), None);
         assert_eq!(parse_wm_class(""), None);
+    }
+
+    #[test]
+    fn parses_xdotool_geometry_output() {
+        let s = "WINDOW=12345\nX=100\nY=200\nWIDTH=800\nHEIGHT=600\n";
+        let g = parse_geometry_from_xdotool_output(s).unwrap();
+        assert_eq!(g.x, 100);
+        assert_eq!(g.y, 200);
+        assert_eq!(g.width, 800);
+        assert_eq!(g.height, 600);
     }
 }
