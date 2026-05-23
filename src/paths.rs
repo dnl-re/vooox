@@ -7,13 +7,17 @@
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
+    xdg_data_home().join("vooox")
+}
+
+fn xdg_data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".local").join("share")
-        });
-    base.join("vooox")
+        .unwrap_or_else(|_| home_dir().join(".local").join("share"))
+}
+
+fn home_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
 }
 
 pub fn venv_dir() -> PathBuf {
