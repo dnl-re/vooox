@@ -241,95 +241,98 @@ impl DictationPanel {
     }
 
     pub fn show_recording(&self, device: &cpal::Device) {
+        self.stop_running_timer();
+        self.prepare_text_buffer_for_new_recording();
+        self.set_status_to_recording();
+        self.reset_waveform_bars_to_zero();
+        self.start_level_meter_for_device(device);
+        self.start_recording_countdown_timer();
+        self.present_panel_and_restore_focus();
+    }
+
+    fn stop_running_timer(&self) {
         if let Some(id) = self.timer_source.borrow_mut().take() {
             id.remove();
         }
+    }
 
-        // Window-mode text-view append/replace logic
-        if self.mode.get() == PanelMode::Window {
-            if self.text_view.has_focus() {
-                let buf = self.text_view.buffer();
-                let mut existing: String =
-                    buf.text(&buf.start_iter(), &buf.end_iter(), false).into();
-                if !existing.is_empty() && !existing.ends_with(' ') {
-                    existing.push(' ');
-                    buf.insert(&mut buf.end_iter(), " ");
-                }
-                *self.base_text.borrow_mut() = existing;
-            } else {
-                self.text_view.buffer().set_text("");
-                *self.base_text.borrow_mut() = String::new();
-            }
+    fn prepare_text_buffer_for_new_recording(&self) {
+        if self.mode.get() == PanelMode::Window && self.text_view.has_focus() {
+            self.append_space_to_existing_text();
         } else {
-            // Icon mode: text never shown here, base is empty so set_transcript works
             self.text_view.buffer().set_text("");
             *self.base_text.borrow_mut() = String::new();
         }
+    }
 
-        // window-mode status
+    fn append_space_to_existing_text(&self) {
+        let buf = self.text_view.buffer();
+        let mut existing: String = buf.text(&buf.start_iter(), &buf.end_iter(), false).into();
+        if !existing.is_empty() && !existing.ends_with(' ') {
+            existing.push(' ');
+            buf.insert(&mut buf.end_iter(), " ");
+        }
+        *self.base_text.borrow_mut() = existing;
+    }
+
+    fn set_status_to_recording(&self) {
         self.status_label.set_text("● Aufnahme");
         self.status_label.remove_css_class("status-proc");
         self.status_label.remove_css_class("status-idle");
         self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-rec");
-
-        // icon-mode visuals
         self.set_pill_dot_state(PillDot::Recording);
         self.pill_phase.set(PillPhase::Recording);
-        // reset waveform history
-        {
-            let mut hist = self.level_history.borrow_mut();
-            for v in hist.iter_mut() {
-                *v = 0.0;
-            }
-        }
         self.pill_timer.set_text("00:00");
+    }
 
-        // start level meter — drives BOTH the LevelBar (window mode)
-        // and the DrawingArea history (icon mode)
+    fn reset_waveform_bars_to_zero(&self) {
+        for v in self.level_history.borrow_mut().iter_mut() {
+            *v = 0.0;
+        }
+    }
+
+    fn start_level_meter_for_device(&self, device: &cpal::Device) {
         *self.level_meter.borrow_mut() = None;
         match audio::LevelMeter::start(device) {
             Ok(meter) => {
                 *self.level_meter.borrow_mut() = Some(meter);
-
-                // 50 ms: update the window-mode LevelBar.
-                let meter_rc = Rc::clone(&self.level_meter);
-                let bar = self.level_bar.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                    match meter_rc.borrow().as_ref() {
-                        Some(m) => {
-                            bar.set_value(m.get() as f64);
-                            glib::ControlFlow::Continue
-                        }
-                        None => {
-                            bar.set_value(0.0);
-                            glib::ControlFlow::Break
-                        }
-                    }
-                });
-
-                // 70 ms: shift the waveform history and redraw the pill.
-                let meter_rc = Rc::clone(&self.level_meter);
-                let hist = Rc::clone(&self.level_history);
-                let area = self.pill_waveform.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(70), move || {
-                    let Some(level) = meter_rc.borrow().as_ref().map(|m| m.get()) else {
-                        return glib::ControlFlow::Break;
-                    };
-                    let mut h = hist.borrow_mut();
-                    if h.len() == WAVE_BARS {
-                        h.pop_front();
-                    }
-                    h.push_back(level);
-                    drop(h);
-                    area.queue_draw();
-                    glib::ControlFlow::Continue
-                });
+                self.start_level_bar_update_timer();
+                self.start_waveform_history_update_timer();
             }
             Err(e) => eprintln!("[panel] level meter: {e}"),
         }
+    }
 
-        // 1-second timer (both modes)
+    fn start_level_bar_update_timer(&self) {
+        let meter_rc = Rc::clone(&self.level_meter);
+        let bar = self.level_bar.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            match meter_rc.borrow().as_ref() {
+                Some(m) => { bar.set_value(m.get() as f64); glib::ControlFlow::Continue }
+                None => { bar.set_value(0.0); glib::ControlFlow::Break }
+            }
+        });
+    }
+
+    fn start_waveform_history_update_timer(&self) {
+        let meter_rc = Rc::clone(&self.level_meter);
+        let hist = Rc::clone(&self.level_history);
+        let area = self.pill_waveform.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(70), move || {
+            let Some(level) = meter_rc.borrow().as_ref().map(|m| m.get()) else {
+                return glib::ControlFlow::Break;
+            };
+            let mut h = hist.borrow_mut();
+            if h.len() == WAVE_BARS { h.pop_front(); }
+            h.push_back(level);
+            drop(h);
+            area.queue_draw();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn start_recording_countdown_timer(&self) {
         *self.timer_seconds.borrow_mut() = 0;
         self.timer_label.set_text("00:00");
         self.pill_timer.set_text("00:00");
@@ -345,7 +348,9 @@ impl DictationPanel {
             glib::ControlFlow::Continue
         });
         *self.timer_source.borrow_mut() = Some(id);
+    }
 
+    fn present_panel_and_restore_focus(&self) {
         // Remember the previously active window so we can hand keyboard focus
         // back to it after present() steals it for a moment — and so auto-paste
         // can target it after the transcription is done.
@@ -359,34 +364,28 @@ impl DictationPanel {
         glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
             position_next_to_cursor(&win);
             let our_xid = x11_window::window_xid(&win);
-            if let Some(xid) = our_xid {
-                x11_window::activate_window(xid);
-            }
-            if let Some(ref xid) = prev_active {
-                x11_window::focus_window(xid);
-            }
-            if let Some(xid) = our_xid {
-                x11_window::raise_window(xid);
-            }
+            if let Some(xid) = our_xid { x11_window::activate_window(xid); }
+            if let Some(ref xid) = prev_active { x11_window::focus_window(xid); }
+            if let Some(xid) = our_xid { x11_window::raise_window(xid); }
         });
     }
 
     pub fn show_processing(&self) {
         *self.level_meter.borrow_mut() = None;
-        if let Some(id) = self.timer_source.borrow_mut().take() {
-            id.remove();
-        }
+        self.stop_running_timer();
+        self.set_status_to_processing();
+        self.processing_started_at.set(Some(std::time::Instant::now()));
+        self.start_processing_animation();
+    }
+
+    fn set_status_to_processing(&self) {
         self.status_label.set_text("⏳ Verarbeitung…");
         self.status_label.remove_css_class("status-rec");
         self.status_label.remove_css_class("status-idle");
         self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-proc");
-
-        // icon-mode: switch waveform to traveling sine wave in orange.
         self.set_pill_dot_state(PillDot::Processing);
         self.pill_phase.set(PillPhase::Processing);
-        self.processing_started_at.set(Some(std::time::Instant::now()));
-        self.start_processing_animation();
     }
 
     /// Drive the pill waveform with a traveling sine wave during processing.
@@ -444,111 +443,129 @@ impl DictationPanel {
     }
 
     pub fn finish(&self, full_text: &str, cfg: &Config, history: Rc<RefCell<History>>) {
+        self.set_status_to_idle();
+        let remaining = self.time_remaining_in_minimum_processing_window();
+
+        if full_text.is_empty() {
+            self.dismiss_pill_after_empty_result(remaining);
+            return;
+        }
+
+        let auto_paste = self.pending_auto_paste.replace(false);
+        self.show_completion_toast(auto_paste);
+        self.copy_transcript_or_schedule_auto_paste(full_text, auto_paste, remaining);
+        self.trigger_done_animation_in_icon_mode(remaining);
+        save_transcription_to_history(full_text, cfg, history);
+    }
+
+    fn set_status_to_idle(&self) {
         self.status_label.set_text("○ Bereit");
         self.status_label.remove_css_class("status-proc");
         self.status_label.remove_css_class("status-rec");
         self.status_label.remove_css_class("status-ptt");
         self.status_label.add_css_class("status-idle");
         self.timer_label.set_text("");
+    }
 
+    fn time_remaining_in_minimum_processing_window(&self) -> std::time::Duration {
         // Keep the processing animation visible for at least 600 ms so the
         // user actually sees it even if whisper returns very quickly.
         let min_processing = std::time::Duration::from_millis(600);
-        let remaining = self
-            .processing_started_at
+        self.processing_started_at
             .get()
             .and_then(|t| min_processing.checked_sub(t.elapsed()))
-            .unwrap_or(std::time::Duration::ZERO);
+            .unwrap_or(std::time::Duration::ZERO)
+    }
 
-        if full_text.is_empty() {
-            if self.mode.get() == PanelMode::Icon {
-                let panel_window = self.window.clone();
-                let win_state = Rc::clone(&self.win_state);
-                let phase = Rc::clone(&self.pill_phase);
-                let dot = self.pill_dot.clone();
-                glib::timeout_add_local_once(remaining, move || {
-                    phase.set(PillPhase::Recording);
-                    dot.remove_css_class("pill-dot-proc");
-                    dot.remove_css_class("pill-dot-done");
-                    save_window_position(&panel_window, &win_state);
-                    panel_window.set_visible(false);
-                });
-            }
+    fn dismiss_pill_after_empty_result(&self, delay: std::time::Duration) {
+        if self.mode.get() != PanelMode::Icon {
             return;
         }
-
-        let auto_paste = self.pending_auto_paste.replace(false);
-        self.toast_label.set_text(if auto_paste {
-            "✓ Eingefügt"
-        } else {
-            "✓ In Zwischenablage kopiert"
+        let panel_window = self.window.clone();
+        let win_state = Rc::clone(&self.win_state);
+        let phase = Rc::clone(&self.pill_phase);
+        let dot = self.pill_dot.clone();
+        glib::timeout_add_local_once(delay, move || {
+            phase.set(PillPhase::Recording);
+            dot.remove_css_class("pill-dot-proc");
+            dot.remove_css_class("pill-dot-done");
+            save_window_position(&panel_window, &win_state);
+            panel_window.set_visible(false);
         });
+    }
+
+    fn show_completion_toast(&self, auto_paste: bool) {
+        self.toast_label.set_text(if auto_paste { "✓ Eingefügt" } else { "✓ In Zwischenablage kopiert" });
         let lbl = self.toast_label.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
-            lbl.set_text("");
-        });
+        glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || lbl.set_text(""));
+    }
 
-        if let Some(display) = gtk4::gdk::Display::default() {
-            let clipboard = display.clipboard();
-            if auto_paste {
-                // Save the user's existing clipboard contents, paste the
-                // transcript via Ctrl+V, then restore the original after the
-                // paste has landed — so dictating doesn't clobber whatever
-                // the user had on their clipboard before.
-                //
-                // Only text contents can be preserved this way; if the
-                // clipboard held something else (image, files, etc.) we
-                // fall back to clearing it after paste.
-                let target = self.prev_active_xid.borrow().clone();
-                let full_owned = full_text.to_string();
-                let cb_for_callback = clipboard.clone();
-                clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
-                    let prev: Option<String> = result.ok().flatten().map(|s| s.to_string());
-                    cb_for_callback.set_text(&full_owned);
-                    schedule_auto_paste(target, remaining);
-                    // Wait long enough for the simulated Ctrl+V (fired
-                    // `remaining + 120 ms` after we entered finish) to have
-                    // been consumed by the target window before swapping the
-                    // clipboard back.
-                    let cb_restore = cb_for_callback.clone();
-                    let restore_after = remaining + std::time::Duration::from_millis(800);
-                    glib::timeout_add_local_once(restore_after, move || match prev {
-                        Some(t) => cb_restore.set_text(&t),
-                        None => cb_restore.set_text(""),
-                    });
-                });
-            } else {
-                clipboard.set_text(full_text);
-            }
+    fn copy_transcript_or_schedule_auto_paste(
+        &self,
+        full_text: &str,
+        auto_paste: bool,
+        remaining: std::time::Duration,
+    ) {
+        let Some(display) = gtk4::gdk::Display::default() else { return };
+        let clipboard = display.clipboard();
+        if auto_paste {
+            self.paste_transcript_and_restore_clipboard(full_text, clipboard, remaining);
+        } else {
+            clipboard.set_text(full_text);
         }
+    }
 
-        // icon-mode: hold processing animation for min duration, then play
-        // the green-sweep "done" animation, which hides the pill at its end.
-        if self.mode.get() == PanelMode::Icon {
-            let dot = self.pill_dot.clone();
-            let phase = Rc::clone(&self.pill_phase);
-            let timer_lbl = self.pill_timer.clone();
-            let hist = Rc::clone(&self.level_history);
-            let area = self.pill_waveform.clone();
-            let panel_window = self.window.clone();
-            let win_state = Rc::clone(&self.win_state);
-            glib::timeout_add_local_once(remaining, move || {
-                // Stop the processing animation timer.
-                phase.set(PillPhase::Done);
-                dot.remove_css_class("pill-dot-proc");
-                dot.add_css_class("pill-dot-done");
-                timer_lbl.set_text("");
-                start_done_animation(hist, area, phase, dot, panel_window, win_state);
+    fn paste_transcript_and_restore_clipboard(
+        &self,
+        full_text: &str,
+        clipboard: gtk4::gdk::Clipboard,
+        remaining: std::time::Duration,
+    ) {
+        // Save the user's existing clipboard contents, paste the transcript via
+        // Ctrl+V, then restore the original after the paste has landed — so
+        // dictating doesn't clobber whatever the user had on their clipboard before.
+        //
+        // Only text contents can be preserved this way; if the clipboard held
+        // something else (image, files, etc.) we fall back to clearing it after paste.
+        let target = self.prev_active_xid.borrow().clone();
+        let full_owned = full_text.to_string();
+        let cb_for_callback = clipboard.clone();
+        clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
+            let prev_clipboard_text: Option<String> = result.ok().flatten().map(|s| s.to_string());
+            cb_for_callback.set_text(&full_owned);
+            schedule_auto_paste(target, remaining);
+            // Wait long enough for the simulated Ctrl+V (fired `remaining + 120 ms`
+            // after we entered finish) to have been consumed by the target window
+            // before swapping the clipboard back.
+            let cb_restore = cb_for_callback.clone();
+            let restore_after = remaining + std::time::Duration::from_millis(800);
+            glib::timeout_add_local_once(restore_after, move || {
+                match prev_clipboard_text {
+                    Some(t) => cb_restore.set_text(&t),
+                    None => cb_restore.set_text(""),
+                }
             });
-        }
+        });
+    }
 
-        let entry = HistoryEntry {
-            text: full_text.to_string(),
-            timestamp: crate::history::now_rfc3339(),
-            model: cfg.model.clone(),
-            language: cfg.language.clone(),
-        };
-        history.borrow_mut().push(entry);
+    fn trigger_done_animation_in_icon_mode(&self, delay: std::time::Duration) {
+        if self.mode.get() != PanelMode::Icon {
+            return;
+        }
+        let dot = self.pill_dot.clone();
+        let phase = Rc::clone(&self.pill_phase);
+        let timer_lbl = self.pill_timer.clone();
+        let hist = Rc::clone(&self.level_history);
+        let area = self.pill_waveform.clone();
+        let panel_window = self.window.clone();
+        let win_state = Rc::clone(&self.win_state);
+        glib::timeout_add_local_once(delay, move || {
+            phase.set(PillPhase::Done);
+            dot.remove_css_class("pill-dot-proc");
+            dot.add_css_class("pill-dot-done");
+            timer_lbl.set_text("");
+            start_done_animation(hist, area, phase, dot, panel_window, win_state);
+        });
     }
 
     /// Arm auto-paste for the next [`finish`] call. Consumed (cleared) by
@@ -603,33 +620,41 @@ fn start_done_animation(
             return glib::ControlFlow::Break;
         }
 
-        let n = {
-            let h = hist.borrow();
-            h.len().max(1) as f32
-        };
+        let n = hist.borrow().len().max(1) as f32;
         let mut h = hist.borrow_mut();
         for (i, slot) in h.iter_mut().enumerate() {
-            let i_f = i as f32;
-            let v: f32 = if t < sweep_dur {
-                let progress = t / sweep_dur * n;
-                // Triangle pulse around `progress`, width ~1.4 bars.
-                let dist = (progress - i_f).abs();
-                let pulse = (1.0_f32 - dist / 1.4).max(0.0);
-                // Bars already passed by the sweep settle at ~0.45.
-                let settled: f32 = if progress > i_f + 0.4 { 0.45 } else { 0.0 };
-                pulse.max(settled)
-            } else {
-                let fade_t = ((t - sweep_dur) / fade_dur).clamp(0.0, 1.0);
-                0.45 * (1.0 - fade_t)
-            };
-            // draw_func applies sqrt(); pre-square so the on-screen height
-            // tracks `v` linearly.
-            *slot = v * v;
+            let bar_height = calculate_sweep_bar_height(i as f32, t, n, sweep_dur, fade_dur);
+            // draw_func applies sqrt(); pre-square so the on-screen height tracks linearly.
+            *slot = bar_height * bar_height;
         }
         drop(h);
         area.queue_draw();
         glib::ControlFlow::Continue
     });
+}
+
+fn calculate_sweep_bar_height(bar_index: f32, t: f32, n: f32, sweep_dur: f32, fade_dur: f32) -> f32 {
+    if t < sweep_dur {
+        let progress = t / sweep_dur * n;
+        let dist = (progress - bar_index).abs();
+        let pulse = (1.0_f32 - dist / 1.4).max(0.0);
+        // Bars already passed by the sweep settle at ~0.45.
+        let settled: f32 = if progress > bar_index + 0.4 { 0.45 } else { 0.0 };
+        pulse.max(settled)
+    } else {
+        let fade_progress = ((t - sweep_dur) / fade_dur).clamp(0.0, 1.0);
+        0.45 * (1.0 - fade_progress)
+    }
+}
+
+fn save_transcription_to_history(full_text: &str, cfg: &Config, history: Rc<RefCell<History>>) {
+    let entry = HistoryEntry {
+        text: full_text.to_string(),
+        timestamp: crate::history::now_rfc3339(),
+        model: cfg.model.clone(),
+        language: cfg.language.clone(),
+    };
+    history.borrow_mut().push(entry);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -661,47 +686,32 @@ fn position_next_to_cursor(window: &ApplicationWindow) {
     let Some(mon) = x11_window::monitor_containing(cx, cy) else { return };
     let Some(xid) = x11_window::window_xid(window) else { return };
 
-    let (mon_x, mon_y, mon_w, mon_h) = x11_window::monitor_geometry_physical(&mon);
+    let mon = x11_window::monitor_geometry_physical(&mon);
     let scale = window.scale_factor().max(1);
     let (default_w, default_h) = window.default_size();
-    let logical_w = if window.width() > 10 {
-        window.width()
-    } else if default_w > 0 {
-        default_w
-    } else {
-        WIN_W
-    };
-    let logical_h = if window.height() > 10 {
-        window.height()
-    } else if default_h > 0 {
-        default_h
-    } else {
-        WIN_H
-    };
+    let logical_w = if window.width() > 10 { window.width() }
+        else if default_w > 0 { default_w } else { WIN_W };
+    let logical_h = if window.height() > 10 { window.height() }
+        else if default_h > 0 { default_h } else { WIN_H };
     let win_w = logical_w * scale;
     let win_h = logical_h * scale;
     let margin = 16 * scale;
 
     let right_x = cx + margin;
-    let x = if right_x + win_w <= mon_x + mon_w {
-        right_x
-    } else {
-        (cx - margin - win_w).max(mon_x)
-    };
-    let y = (cy - win_h / 2)
-        .max(mon_y)
-        .min(mon_y + mon_h - win_h);
+    let x = if right_x + win_w <= mon.x + mon.width { right_x }
+        else { (cx - margin - win_w).max(mon.x) };
+    let y = (cy - win_h / 2).max(mon.y).min(mon.y + mon.height - win_h);
 
     x11_window::move_window(xid, x, y);
 }
 
 fn save_window_position(window: &ApplicationWindow, state: &Rc<RefCell<WindowState>>) {
     let Some(xid) = x11_window::window_xid(window) else { return };
-    let Some((x, y, w, h)) = x11_window::window_geometry(xid) else { return };
-    let center = (x + w / 2, y + h / 2);
+    let Some(geo) = x11_window::window_geometry(xid) else { return };
+    let center = (geo.x + geo.width / 2, geo.y + geo.height / 2);
     let Some(mon) = x11_window::monitor_containing(center.0, center.1) else { return };
     let mut st = state.borrow_mut();
-    st.set(monitor_key(&mon), (x, y));
+    st.set(monitor_key(&mon), (geo.x, geo.y));
     st.save();
 }
 
