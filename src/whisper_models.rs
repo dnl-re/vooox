@@ -38,16 +38,7 @@ fn duration_at_100mbit(size_mb: u32) -> String {
 
 pub fn size_label(id: &str) -> String {
     match info(id) {
-        Some(m) if m.size_mb >= 1000 => format!(
-            "ca. {:.1} GB · {} bei 100 Mbit",
-            m.size_mb as f32 / 1000.0,
-            duration_at_100mbit(m.size_mb)
-        ),
-        Some(m) => format!(
-            "ca. {} MB · {} bei 100 Mbit",
-            m.size_mb,
-            duration_at_100mbit(m.size_mb)
-        ),
+        Some(m) => format!("{} · {} bei 100 Mbit", format_file_size(m.size_mb), duration_at_100mbit(m.size_mb)),
         None => "unbekannte Größe".into(),
     }
 }
@@ -56,9 +47,16 @@ pub fn size_label(id: &str) -> String {
 /// nicht überlang wird.
 pub fn size_label_short(id: &str) -> String {
     match info(id) {
-        Some(m) if m.size_mb >= 1000 => format!("ca. {:.1} GB", m.size_mb as f32 / 1000.0),
-        Some(m) => format!("ca. {} MB", m.size_mb),
+        Some(m) => format_file_size(m.size_mb),
         None => "?".into(),
+    }
+}
+
+fn format_file_size(size_mb: u32) -> String {
+    if size_mb >= 1000 {
+        format!("ca. {:.1} GB", size_mb as f32 / 1000.0)
+    } else {
+        format!("ca. {} MB", size_mb)
     }
 }
 
