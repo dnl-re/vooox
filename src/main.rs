@@ -32,10 +32,12 @@ type StreamRx = crossbeam_channel::Receiver<Option<String>>;
 // ── headless test-pipeline mode ───────────────────────────────────────────
 
 async fn run_test_pipeline_async(wav_path: &str) -> i32 {
-    let (mut child, port) = match sidecar::spawn_sidecar() {
+    let sidecar_process = match sidecar::start_whisper_sidecar() {
         Ok(x) => x,
         Err(e) => { eprintln!("sidecar error: {e}"); return 1; }
     };
+    let port = sidecar_process.port;
+    let mut child = sidecar_process.child;
     if let Err(e) = whisper_client::wait_for_ready(port, 60).await {
         eprintln!("{e}");
         let _ = child.kill();
@@ -90,15 +92,9 @@ fn main() -> glib::ExitCode {
 fn build_ui(app: &Application) {
     let config = Rc::new(RefCell::new(Config::load()));
 
-    // Force-CPU-Toggle wirkt nur beim Sidecar-Start: hier ans env weitergeben,
-    // bevor wir den Subprocess spawnen.
-    if config.borrow().force_cpu {
-        std::env::set_var("VOOOX_FORCE_CPU", "1");
-    } else {
-        std::env::remove_var("VOOOX_FORCE_CPU");
-    }
+    apply_force_cpu_setting(&config.borrow());
 
-    let (sidecar, port) = match sidecar::spawn_sidecar() {
+    let sidecar_process = match sidecar::start_whisper_sidecar() {
         Ok(x) => x,
         Err(e) => {
             eprintln!("[main] sidecar failed: {e}");
@@ -106,60 +102,29 @@ fn build_ui(app: &Application) {
             return;
         }
     };
+    let port = sidecar_process.port;
+    let sidecar = sidecar_process.child;
 
     let (shortcut_tx, shortcut_rx) = bounded::<shortcuts::ShortcutEvent>(16);
     let (tray_tx, tray_rx) = bounded::<AppCommand>(8);
 
-    let shortcut_str = config.borrow().shortcut.clone();
-    match shortcuts::Shortcut::parse(&shortcut_str) {
-        Ok(sc) => shortcuts::spawn_listener(sc, shortcut_tx),
-        Err(e) => eprintln!("[shortcuts] invalid shortcut '{shortcut_str}': {e}"),
-    }
-
+    start_shortcut_listener(&config.borrow(), shortcut_tx);
     let tray_handle = tray::spawn_tray(tray_tx.clone(), config.borrow().panel_mode);
 
     let history = Rc::new(RefCell::new(History::load()));
     let panel = Rc::new(DictationPanel::new(app, tray_tx.clone(), Rc::clone(&config)));
 
-    // Push saved model/language to sidecar once it's ready, so the persisted
-    // selection from a previous run is actually applied.
-    {
-        let model = config.borrow().model.clone();
-        let language = config.borrow().language.clone();
-        let start = std::time::Instant::now();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async move {
-                match whisper_client::wait_for_ready(port, 60).await {
-                    Ok(_) => {
-                        let client = WhisperClient::new(port);
-                        if let Err(e) = client.set_config(&model, &language).await {
-                            eprintln!("[whisper] initial set_config: {e}");
-                        }
-                        eprintln!(
-                            "[main] vooox ready — model={model} language={language} port={port} startup={:.1}s",
-                            start.elapsed().as_secs_f32()
-                        );
-                    }
-                    Err(e) => eprintln!("[main] sidecar not ready: {e}"),
-                }
-            });
-        });
-    }
+    push_saved_config_to_sidecar_once_ready(port, &config.borrow());
 
     let recording = Rc::new(RefCell::new(false));
     let recorder: Rc<RefCell<Option<audio::Recorder>>> = Rc::new(RefCell::new(None));
-    // PTT state: incremented on every Press; the threshold timer captures the
+    // PTT state: hold_id is incremented on every Press; the threshold timer captures the
     // hold-id at scheduling time and only flips the visual if the same hold is
     // still active when the timer fires.
     let hold_id: Rc<Cell<u64>> = Rc::new(Cell::new(0));
     let ptt_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
-    let device_name = config.borrow().microphone.clone();
-    let input_device = device_name
-        .as_deref()
-        .and_then(audio::find_device_by_name)
-        .or_else(audio::default_input_device);
+    let input_device = resolve_audio_device_from_config(&config.borrow());
 
     {
         let panel = Rc::clone(&panel);
@@ -317,6 +282,56 @@ fn build_ui(app: &Application) {
     });
 }
 
+// ── setup helpers ─────────────────────────────────────────────────────────
+
+fn apply_force_cpu_setting(cfg: &Config) {
+    // Force-CPU-Toggle wirkt nur beim Sidecar-Start: hier ans env weitergeben.
+    if cfg.force_cpu {
+        std::env::set_var("VOOOX_FORCE_CPU", "1");
+    } else {
+        std::env::remove_var("VOOOX_FORCE_CPU");
+    }
+}
+
+fn start_shortcut_listener(cfg: &Config, shortcut_tx: crossbeam_channel::Sender<shortcuts::ShortcutEvent>) {
+    let shortcut_str = cfg.shortcut.clone();
+    match shortcuts::Shortcut::parse(&shortcut_str) {
+        Ok(sc) => shortcuts::spawn_listener(sc, shortcut_tx),
+        Err(e) => eprintln!("[shortcuts] invalid shortcut '{shortcut_str}': {e}"),
+    }
+}
+
+fn push_saved_config_to_sidecar_once_ready(port: u16, cfg: &Config) {
+    let model = cfg.model.clone();
+    let language = cfg.language.clone();
+    let start = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            match whisper_client::wait_for_ready(port, 60).await {
+                Ok(_) => {
+                    let client = WhisperClient::new(port);
+                    if let Err(e) = client.set_config(&model, &language).await {
+                        eprintln!("[whisper] initial set_config: {e}");
+                    }
+                    eprintln!(
+                        "[main] vooox ready — model={model} language={language} port={port} startup={:.1}s",
+                        start.elapsed().as_secs_f32()
+                    );
+                }
+                Err(e) => eprintln!("[main] sidecar not ready: {e}"),
+            }
+        });
+    });
+}
+
+fn resolve_audio_device_from_config(cfg: &Config) -> Option<cpal::Device> {
+    cfg.microphone
+        .as_deref()
+        .and_then(audio::find_device_by_name)
+        .or_else(audio::default_input_device)
+}
+
 // ── recording state machine ───────────────────────────────────────────────
 
 fn start_recording(
@@ -435,17 +450,16 @@ fn spawn_streaming_timer(
                     let count = rec.sample_count();
                     let min_new = (rec.sample_rate as usize) * (rec.channels as usize) * 3;
                     if count >= *stream_last_len.borrow() + min_new {
-                        let (s, sr, ch) = rec.peek_samples();
-                        Some((s, sr, ch))
+                        Some(rec.peek_samples())
                     } else {
                         None
                     }
                 })
             };
-            if let Some((samples, sr, ch)) = maybe_wav {
-                *stream_last_len.borrow_mut() = samples.len();
-                let mono = audio::to_mono(&samples, ch);
-                let wav = audio::to_wav_bytes(&mono, sr, 1);
+            if let Some(captured) = maybe_wav {
+                *stream_last_len.borrow_mut() = captured.samples.len();
+                let mono = audio::to_mono(&captured.samples, captured.channels);
+                let wav = audio::to_wav_bytes(&mono, captured.sample_rate, 1);
                 let (tx, rx) = bounded::<Option<String>>(1);
                 *stream_rx.borrow_mut() = Some(rx);
                 std::thread::spawn(move || {
