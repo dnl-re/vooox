@@ -20,13 +20,7 @@ pub struct History {
 }
 
 fn history_path() -> PathBuf {
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".local").join("share")
-        });
-    base.join("vooox").join("history.jsonl")
+    crate::paths::data_dir().join("history.jsonl")
 }
 
 impl History {
@@ -40,14 +34,14 @@ impl History {
         let Ok(text) = fs::read_to_string(path) else {
             return VecDeque::new();
         };
-        let mut v: VecDeque<HistoryEntry> = text
+        let mut entries: VecDeque<HistoryEntry> = text
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
-        while v.len() > MAX_ENTRIES {
-            v.pop_front();
+        while entries.len() > MAX_ENTRIES {
+            entries.pop_front();
         }
-        v
+        entries
     }
 
     pub fn push(&mut self, entry: HistoryEntry) {
@@ -59,9 +53,7 @@ impl History {
     }
 
     fn append_line(&self, entry: &HistoryEntry) {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        ensure_history_dir_exists(&self.path);
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&self.path) {
             if let Ok(line) = serde_json::to_string(entry) {
                 let _ = writeln!(f, "{line}");
@@ -75,19 +67,18 @@ impl History {
     }
 
     fn rewrite(&self) {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut f) = OpenOptions::new()
+        ensure_history_dir_exists(&self.path);
+        let Ok(mut f) = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open(&self.path)
-        {
-            for entry in &self.entries {
-                if let Ok(line) = serde_json::to_string(entry) {
-                    let _ = writeln!(f, "{line}");
-                }
+        else {
+            return;
+        };
+        for entry in &self.entries {
+            if let Ok(line) = serde_json::to_string(entry) {
+                let _ = writeln!(f, "{line}");
             }
         }
     }
@@ -102,23 +93,42 @@ impl History {
     }
 }
 
+fn ensure_history_dir_exists(path: &PathBuf) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+}
+
 pub fn now_rfc3339() -> String {
+    let total_seconds = seconds_since_unix_epoch();
+    let (year, month, day) = approximate_calendar_date(total_seconds);
+    let (h, m, s) = time_of_day(total_seconds);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn seconds_since_unix_epoch() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    // simple ISO-8601 without chrono dependency
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    // days since 1970-01-01 → approx date (good enough for a timestamp label)
+        .as_secs()
+}
+
+fn time_of_day(total_seconds: u64) -> (u64, u64, u64) {
+    let s = total_seconds % 60;
+    let m = (total_seconds / 60) % 60;
+    let h = (total_seconds / 3600) % 24;
+    (h, m, s)
+}
+
+fn approximate_calendar_date(total_seconds: u64) -> (u64, u64, u64) {
+    // simple approximation without chrono dependency
+    let days = total_seconds / 86400;
     let year = 1970 + days / 365;
     let day_of_year = days % 365;
     let month = day_of_year / 30 + 1;
     let day = day_of_year % 30 + 1;
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+    (year, month, day)
 }
 
 #[cfg(test)]
