@@ -75,35 +75,49 @@ pub(super) fn start_done_animation(
     win: ApplicationWindow,
     win_state: Rc<RefCell<WindowState>>,
 ) {
+    const SWEEP_DUR: f32 = 0.55;
+    const FADE_DUR: f32 = 0.45;
     let start = std::time::Instant::now();
-    let sweep_dur = 0.55_f32;
-    let fade_dur = 0.45_f32;
-    let total_dur = sweep_dur + fade_dur;
-
     glib::timeout_add_local(std::time::Duration::from_millis(35), move || {
-        if phase.get() != PillPhase::Done {
-            return glib::ControlFlow::Break;
-        }
+        if phase.get() != PillPhase::Done { return glib::ControlFlow::Break; }
         let t = start.elapsed().as_secs_f32();
-        if t >= total_dur {
-            save_window_position(&win, &win_state);
-            win.set_visible(false);
-            dot.remove_css_class("pill-dot-done");
-            phase.set(PillPhase::Recording);
-            area.queue_draw();
+        if t >= SWEEP_DUR + FADE_DUR {
+            finish_done_animation(&area, &phase, &dot, &win, &win_state);
             return glib::ControlFlow::Break;
         }
-
-        let n = hist.borrow().len().max(1) as f32;
-        let mut h = hist.borrow_mut();
-        for (i, slot) in h.iter_mut().enumerate() {
-            let bar_height = calculate_sweep_bar_height(i as f32, t, n, sweep_dur, fade_dur);
-            *slot = bar_height * bar_height;
-        }
-        drop(h);
-        area.queue_draw();
+        tick_done_animation_frame(&hist, &area, t, SWEEP_DUR, FADE_DUR);
         glib::ControlFlow::Continue
     });
+}
+
+fn finish_done_animation(
+    area: &DrawingArea,
+    phase: &Rc<Cell<PillPhase>>,
+    dot: &Label,
+    win: &ApplicationWindow,
+    win_state: &Rc<RefCell<WindowState>>,
+) {
+    save_window_position(win, win_state);
+    win.set_visible(false);
+    dot.remove_css_class("pill-dot-done");
+    phase.set(PillPhase::Recording);
+    area.queue_draw();
+}
+
+fn tick_done_animation_frame(
+    hist: &Rc<RefCell<VecDeque<f32>>>,
+    area: &DrawingArea,
+    t: f32,
+    sweep_dur: f32,
+    fade_dur: f32,
+) {
+    let n = hist.borrow().len().max(1) as f32;
+    let mut h = hist.borrow_mut();
+    for (i, slot) in h.iter_mut().enumerate() {
+        *slot = calculate_sweep_bar_height(i as f32, t, n, sweep_dur, fade_dur).powi(2);
+    }
+    drop(h);
+    area.queue_draw();
 }
 
 fn calculate_sweep_bar_height(bar_index: f32, t: f32, n: f32, sweep_dur: f32, fade_dur: f32) -> f32 {

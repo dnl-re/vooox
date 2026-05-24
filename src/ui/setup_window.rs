@@ -62,9 +62,18 @@ pub fn show<F: Fn() + 'static>(app: &Application, on_done: F) {
 
 // ── page 1: system check ──────────────────────────────────────────────────
 
-fn build_page_system_check(stack: &Stack) -> GtkBox {
-    let page = page_box();
+fn build_system_check_status_list() -> (GtkBox, StatusRow, StatusRow, StatusRow) {
+    let python_row = StatusRow::new();
+    let xdotool_row = StatusRow::new();
+    let ydotool_row = StatusRow::new();
+    let list = GtkBox::new(Orientation::Vertical, 8);
+    list.append(&python_row.widget);
+    list.append(&xdotool_row.widget);
+    list.append(&ydotool_row.widget);
+    (list, python_row, xdotool_row, ydotool_row)
+}
 
+fn build_system_check_header() -> (Label, Label) {
     let title = heading("1 · System prüfen");
     let subtitle = Label::new(Some(
         "vooox prüft, welche Voraussetzungen schon erfüllt sind.",
@@ -72,105 +81,164 @@ fn build_page_system_check(stack: &Stack) -> GtkBox {
     subtitle.set_xalign(0.0);
     subtitle.add_css_class("dim-label");
     subtitle.set_margin_bottom(6);
+    (title, subtitle)
+}
 
-    let python_row = StatusRow::new();
-    let xdotool_row = StatusRow::new();
-    let ydotool_row = StatusRow::new();
+fn build_system_check_buttons() -> (Button, Button) {
+    let recheck_btn = Button::with_label("Erneut prüfen");
+    let next_btn = Button::with_label("Weiter");
+    next_btn.add_css_class("suggested-action");
+    next_btn.set_sensitive(false);
+    (recheck_btn, next_btn)
+}
 
-    let list = GtkBox::new(Orientation::Vertical, 8);
-    list.append(&python_row.widget);
-    list.append(&xdotool_row.widget);
-    list.append(&ydotool_row.widget);
+fn xdotool_found_markup() -> &'static str {
+    "<tt>xdotool</tt> gefunden — Auto-Paste &amp; Fenster-Positionierung verfügbar."
+}
 
+fn xdotool_missing_markup() -> &'static str {
+    "<tt>xdotool</tt> nicht gefunden — Auto-Paste &amp; Fenster-Positionierung deaktiviert."
+}
+
+fn update_xdotool_row(xdotool_row: &StatusRow) {
+    if which("xdotool") {
+        xdotool_row.set(Status::Ok, xdotool_found_markup());
+    } else {
+        xdotool_row.set(Status::Warn, xdotool_missing_markup());
+    }
+}
+
+fn ydotool_found_markup() -> &'static str {
+    "<tt>ydotool</tt> gefunden — Text-Injection unter Wayland möglich."
+}
+
+fn ydotool_missing_markup() -> &'static str {
+    "<tt>ydotool</tt> nicht gefunden — nur relevant für native Wayland-Apps."
+}
+
+fn update_ydotool_row(ydotool_row: &StatusRow) {
+    if which("ydotool") {
+        ydotool_row.set(Status::Ok, ydotool_found_markup());
+    } else {
+        ydotool_row.set(Status::Info, ydotool_missing_markup());
+    }
+}
+
+fn python_ok_markup(version: &str) -> String {
+    format!("Python <b>{version}</b> mit <tt>venv</tt>-Modul gefunden.")
+}
+
+fn update_python_row_and_report_ok(python_row: &StatusRow) -> bool {
+    match check_python() {
+        Ok(version) => {
+            python_row.set(Status::Ok, &python_ok_markup(&version));
+            true
+        }
+        Err(reason) => {
+            python_row.set(Status::Error, &format!("<b>Python:</b> {reason}"));
+            false
+        }
+    }
+}
+
+fn update_instructions_after_python_check(
+    python_ok: bool,
+    instructions: &Label,
+    next_btn: &Button,
+) {
+    if python_ok {
+        instructions.set_text("");
+        next_btn.set_sensitive(true);
+    } else {
+        instructions.set_markup(&install_instructions_markup());
+        next_btn.set_sensitive(false);
+    }
+}
+
+fn run_system_check(
+    python_row: &StatusRow,
+    xdotool_row: &StatusRow,
+    ydotool_row: &StatusRow,
+    instructions: &Label,
+    next_btn: &Button,
+) {
+    let python_ok = update_python_row_and_report_ok(python_row);
+    update_xdotool_row(xdotool_row);
+    update_ydotool_row(ydotool_row);
+    update_instructions_after_python_check(python_ok, instructions, next_btn);
+}
+
+fn make_run_check_closure(
+    python_row: StatusRow,
+    xdotool_row: StatusRow,
+    ydotool_row: StatusRow,
+    instructions: Label,
+    next_btn: Button,
+) -> impl Fn() + Clone {
+    move || {
+        run_system_check(
+            &python_row,
+            &xdotool_row,
+            &ydotool_row,
+            &instructions,
+            &next_btn,
+        );
+    }
+}
+
+fn build_system_check_instructions_label() -> Label {
     let instructions = Label::new(None);
     instructions.set_xalign(0.0);
     instructions.set_wrap(true);
     instructions.set_selectable(true);
     instructions.set_margin_top(8);
+    instructions
+}
 
+fn append_system_check_page_children(
+    page: &GtkBox,
+    title: &Label,
+    subtitle: &Label,
+    list: &GtkBox,
+    instructions: &Label,
+    buttons: &GtkBox,
+) {
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
-
-    let recheck_btn = Button::with_label("Erneut prüfen");
-    let next_btn = Button::with_label("Weiter");
-    next_btn.add_css_class("suggested-action");
-    next_btn.set_sensitive(false);
-
-    let buttons = button_row(&[&recheck_btn, &next_btn]);
-
-    page.append(&title);
-    page.append(&subtitle);
-    page.append(&list);
-    page.append(&instructions);
+    page.append(title);
+    page.append(subtitle);
+    page.append(list);
+    page.append(instructions);
     page.append(&spacer);
-    page.append(&buttons);
+    page.append(buttons);
+}
 
-    let run_check = {
-        let python_row = python_row.clone();
-        let xdotool_row = xdotool_row.clone();
-        let ydotool_row = ydotool_row.clone();
-        let instructions = instructions.clone();
-        let next_btn = next_btn.clone();
-        move || {
-            let python_ok = match check_python() {
-                Ok(version) => {
-                    python_row.set(
-                        Status::Ok,
-                        &format!("Python <b>{version}</b> mit <tt>venv</tt>-Modul gefunden."),
-                    );
-                    true
-                }
-                Err(reason) => {
-                    python_row.set(Status::Error, &format!("<b>Python:</b> {reason}"));
-                    false
-                }
-            };
-            if which("xdotool") {
-                xdotool_row.set(
-                    Status::Ok,
-                    "<tt>xdotool</tt> gefunden — Auto-Paste &amp; Fenster-Positionierung verfügbar.",
-                );
-            } else {
-                xdotool_row.set(
-                    Status::Warn,
-                    "<tt>xdotool</tt> nicht gefunden — Auto-Paste &amp; Fenster-Positionierung deaktiviert.",
-                );
-            }
-            if which("ydotool") {
-                ydotool_row.set(
-                    Status::Ok,
-                    "<tt>ydotool</tt> gefunden — Text-Injection unter Wayland möglich.",
-                );
-            } else {
-                ydotool_row.set(
-                    Status::Info,
-                    "<tt>ydotool</tt> nicht gefunden — nur relevant für native Wayland-Apps.",
-                );
-            }
-
-            if python_ok {
-                instructions.set_text("");
-                next_btn.set_sensitive(true);
-            } else {
-                instructions.set_markup(&install_instructions_markup());
-                next_btn.set_sensitive(false);
-            }
-        }
-    };
-    run_check();
-
-    {
-        let run_check = run_check.clone();
-        recheck_btn.connect_clicked(move |_| run_check());
-    }
-    {
-        let stack = stack.clone();
-        next_btn.connect_clicked(move |_| {
-            stack.set_visible_child_name("install");
-        });
-    }
-
+fn build_page_system_check(stack: &Stack) -> GtkBox {
+    let page = page_box();
+    let (title, subtitle) = build_system_check_header();
+    let (list, python_row, xdotool_row, ydotool_row) = build_system_check_status_list();
+    let instructions = build_system_check_instructions_label();
+    let (recheck_btn, next_btn) = build_system_check_buttons();
+    let buttons = button_row(&[&recheck_btn, &next_btn]);
+    append_system_check_page_children(&page, &title, &subtitle, &list, &instructions, &buttons);
+    wire_system_check_buttons(python_row, xdotool_row, ydotool_row, instructions, recheck_btn, next_btn, stack);
     page
+}
+
+fn wire_system_check_buttons(
+    python_row: StatusRow,
+    xdotool_row: StatusRow,
+    ydotool_row: StatusRow,
+    instructions: Label,
+    recheck_btn: Button,
+    next_btn: Button,
+    stack: &Stack,
+) {
+    let run_check = make_run_check_closure(python_row, xdotool_row, ydotool_row, instructions, next_btn.clone());
+    run_check();
+    recheck_btn.connect_clicked(move |_| run_check());
+    let stack = stack.clone();
+    next_btn.connect_clicked(move |_| stack.set_visible_child_name("install"));
 }
 
 fn check_python() -> Result<String, String> {
@@ -181,23 +249,33 @@ fn check_python() -> Result<String, String> {
     if !out.status.success() {
         return Err("python3 nicht ausführbar".into());
     }
-    let version_line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let version = extract_python_version_string(&out.stdout, &out.stderr)?;
+    validate_python_version_and_venv(&version)
+}
+
+fn extract_python_version_string(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let version_line = String::from_utf8_lossy(stdout).trim().to_string();
     let version_line = if version_line.is_empty() {
-        String::from_utf8_lossy(&out.stderr).trim().to_string()
+        String::from_utf8_lossy(stderr).trim().to_string()
     } else {
         version_line
     };
-    let version = version_line
+    version_line
         .strip_prefix("Python ")
-        .ok_or_else(|| format!("unerwartete Versionsausgabe: {version_line}"))?
-        .to_string();
-    let (major, minor) = parse_major_minor(&version)
+        .ok_or_else(|| format!("unerwartete Versionsausgabe: {version_line}"))
+        .map(|s| s.to_string())
+}
+
+fn check_python_version_is_at_least_3_10(version: &str) -> Result<(), String> {
+    let (major, minor) = parse_major_minor(version)
         .ok_or_else(|| format!("Version nicht parsbar: {version}"))?;
     if major < 3 || (major == 3 && minor < 10) {
-        return Err(format!(
-            "Python {version} ist zu alt — benötigt wird mindestens 3.10."
-        ));
+        return Err(format!("Python {version} ist zu alt — benötigt wird mindestens 3.10."));
     }
+    Ok(())
+}
+
+fn check_venv_module_available() -> Result<(), String> {
     let venv_check = Command::new("python3")
         .args(["-m", "venv", "--help"])
         .output()
@@ -205,7 +283,13 @@ fn check_python() -> Result<String, String> {
     if !venv_check.status.success() {
         return Err("python3 ist da, aber das venv-Modul fehlt.".into());
     }
-    Ok(version)
+    Ok(())
+}
+
+fn validate_python_version_and_venv(version: &str) -> Result<String, String> {
+    check_python_version_is_at_least_3_10(version)?;
+    check_venv_module_available()?;
+    Ok(version.to_string())
 }
 
 #[derive(Clone, Copy)]
@@ -375,42 +459,7 @@ fn build_page_install(stack: &Stack) -> GtkBox {
             let next_btn = next_btn.clone();
             let start_btn = btn.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let mut done = false;
-                let mut had_error = false;
-                while let Ok(m) = rx.try_recv() {
-                    match m {
-                        InstallMsg::Line(line) => append_log(&log_buffer, &log_view, &line),
-                        InstallMsg::Done => {
-                            done = true;
-                            break;
-                        }
-                        InstallMsg::Error(e) => {
-                            append_log(&log_buffer, &log_view, &format!("\n✗ FEHLER: {e}"));
-                            had_error = true;
-                            done = true;
-                            break;
-                        }
-                    }
-                }
-                if done {
-                    spinner.stop();
-                    spinner.set_visible(false);
-                    if had_error {
-                        start_btn.set_label("Erneut versuchen");
-                        start_btn.set_sensitive(true);
-                    } else {
-                        append_log(&log_buffer, &log_view, "");
-                        append_log(
-                            &log_buffer,
-                            &log_view,
-                            "✓ Successfully installed vooox dependencies.",
-                        );
-                        next_btn.set_sensitive(true);
-                    }
-                    glib::ControlFlow::Break
-                } else {
-                    glib::ControlFlow::Continue
-                }
+                poll_install_messages(&rx, &log_buffer, &log_view, &spinner, &next_btn, &start_btn)
             });
         });
     }
@@ -424,95 +473,212 @@ fn build_page_install(stack: &Stack) -> GtkBox {
     page
 }
 
+/// Drains all pending messages from the channel.
+/// Returns `(done, had_error)`.
+fn handle_install_error_message(
+    e: &str,
+    log_buffer: &TextBuffer,
+    log_view: &TextView,
+) -> (bool, bool) {
+    append_log(log_buffer, log_view, &format!("\n✗ FEHLER: {e}"));
+    (true, true)
+}
+
+/// Drains all pending messages from the channel.
+/// Returns `(done, had_error)`.
+fn drain_install_message_queue(
+    rx: &mpsc::Receiver<InstallMsg>,
+    log_buffer: &TextBuffer,
+    log_view: &TextView,
+) -> (bool, bool) {
+    let mut done = false;
+    let mut had_error = false;
+    while let Ok(m) = rx.try_recv() {
+        match m {
+            InstallMsg::Line(line) => append_log(log_buffer, log_view, &line),
+            InstallMsg::Done => { done = true; break; }
+            InstallMsg::Error(e) => {
+                (done, had_error) = handle_install_error_message(&e, log_buffer, log_view);
+                break;
+            }
+        }
+    }
+    (done, had_error)
+}
+
+fn poll_install_messages(
+    rx: &mpsc::Receiver<InstallMsg>,
+    log_buffer: &TextBuffer,
+    log_view: &TextView,
+    spinner: &Spinner,
+    next_btn: &Button,
+    start_btn: &Button,
+) -> glib::ControlFlow {
+    let (done, had_error) = drain_install_message_queue(rx, log_buffer, log_view);
+    if !done {
+        return glib::ControlFlow::Continue;
+    }
+    finish_install_ui(log_buffer, log_view, spinner, next_btn, start_btn, had_error);
+    glib::ControlFlow::Break
+}
+
+fn finish_install_ui(
+    log_buffer: &TextBuffer,
+    log_view: &TextView,
+    spinner: &Spinner,
+    next_btn: &Button,
+    start_btn: &Button,
+    had_error: bool,
+) {
+    spinner.stop();
+    spinner.set_visible(false);
+    if had_error {
+        start_btn.set_label("Erneut versuchen");
+        start_btn.set_sensitive(true);
+        return;
+    }
+    append_log(log_buffer, log_view, "");
+    append_log(log_buffer, log_view, "✓ Successfully installed vooox dependencies.");
+    next_btn.set_sensitive(true);
+}
+
 enum InstallMsg {
     Line(String),
     Done,
     Error(String),
 }
 
+fn build_venv_create_step(venv: &std::path::Path) -> (&'static str, Vec<String>) {
+    let cmd = vec!["python3".into(), "-m".into(), "venv".into(), venv.display().to_string()];
+    ("venv anlegen", cmd)
+}
+
+fn build_pip_upgrade_step(venv: &std::path::Path) -> (&'static str, Vec<String>) {
+    let pip = venv.join("bin/pip").display().to_string();
+    let cmd = vec![pip, "install".into(), "--upgrade".into(), "pip".into()];
+    ("pip aktualisieren", cmd)
+}
+
+fn build_packages_install_step(venv: &std::path::Path) -> (&'static str, Vec<String>) {
+    let pip = venv.join("bin/pip").display().to_string();
+    let cmd = vec![pip, "install".into(), "faster-whisper".into(), "websockets".into()];
+    ("faster-whisper installieren", cmd)
+}
+
+fn build_install_steps(venv: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        build_venv_create_step(venv),
+        build_pip_upgrade_step(venv),
+        build_packages_install_step(venv),
+    ]
+}
+
+fn ensure_venv_parent_directory(
+    venv: &std::path::Path,
+    tx: &mpsc::Sender<InstallMsg>,
+) -> bool {
+    let parent = match venv.parent() {
+        Some(p) => p,
+        None => return true,
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        let _ = tx.send(InstallMsg::Error(format!("mkdir {}: {e}", parent.display())));
+        return false;
+    }
+    true
+}
+
+fn spawn_install_step_child(
+    label: &str,
+    cmd: &[String],
+    tx: &mpsc::Sender<InstallMsg>,
+) -> Option<std::process::Child> {
+    let (prog, args) = cmd.split_first().unwrap();
+    match Command::new(prog).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            let _ = tx.send(InstallMsg::Error(format!("{label}: {e}")));
+            None
+        }
+    }
+}
+
+fn wait_for_install_step_child(
+    label: &str,
+    child: &mut std::process::Child,
+    tx: &mpsc::Sender<InstallMsg>,
+) -> bool {
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => { let _ = tx.send(InstallMsg::Error(format!("{label}: {e}"))); return false; }
+    };
+    if !status.success() {
+        let _ = tx.send(InstallMsg::Error(format!("{label}: exit {}", status.code().unwrap_or(-1))));
+        return false;
+    }
+    true
+}
+
+fn run_install_step_command(
+    label: &str,
+    cmd: &[String],
+    tx: &mpsc::Sender<InstallMsg>,
+) -> bool {
+    let mut child = match spawn_install_step_child(label, cmd, tx) {
+        Some(c) => c,
+        None => return false,
+    };
+    stream_child_output_to_channel(&mut child, tx);
+    wait_for_install_step_child(label, &mut child, tx)
+}
+
+fn spawn_stdio_line_forwarder(
+    reader: impl std::io::Read + Send + 'static,
+    tx: mpsc::Sender<InstallMsg>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            let _ = tx.send(InstallMsg::Line(line));
+        }
+    })
+}
+
+fn stream_child_output_to_channel(
+    child: &mut std::process::Child,
+    tx: &mpsc::Sender<InstallMsg>,
+) {
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let h_out = spawn_stdio_line_forwarder(stdout, tx.clone());
+    let h_err = spawn_stdio_line_forwarder(stderr, tx.clone());
+    let _ = h_out.join();
+    let _ = h_err.join();
+}
+
+fn run_all_install_steps(
+    steps: &[(&str, Vec<String>)],
+    tx: &mpsc::Sender<InstallMsg>,
+) -> bool {
+    for (label, cmd) in steps {
+        let _ = tx.send(InstallMsg::Line(format!("$ # {label}")));
+        let _ = tx.send(InstallMsg::Line(format!("$ {}", cmd.join(" "))));
+        if !run_install_step_command(label, cmd, tx) {
+            return false;
+        }
+    }
+    true
+}
+
 fn spawn_install_thread(tx: mpsc::Sender<InstallMsg>) {
     std::thread::spawn(move || {
         let venv = paths::venv_dir();
-        if let Some(parent) = venv.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                let _ = tx.send(InstallMsg::Error(format!("mkdir {}: {e}", parent.display())));
-                return;
-            }
+        if !ensure_venv_parent_directory(&venv, &tx) {
+            return;
         }
-
-        let steps: &[(&str, Vec<String>)] = &[
-            (
-                "venv anlegen",
-                vec!["python3".into(), "-m".into(), "venv".into(), venv.display().to_string()],
-            ),
-            (
-                "pip aktualisieren",
-                vec![
-                    venv.join("bin/pip").display().to_string(),
-                    "install".into(),
-                    "--upgrade".into(),
-                    "pip".into(),
-                ],
-            ),
-            (
-                "faster-whisper installieren",
-                vec![
-                    venv.join("bin/pip").display().to_string(),
-                    "install".into(),
-                    "faster-whisper".into(),
-                    "websockets".into(),
-                ],
-            ),
-        ];
-
-        for (label, cmd) in steps {
-            let _ = tx.send(InstallMsg::Line(format!("$ # {label}")));
-            let _ = tx.send(InstallMsg::Line(format!("$ {}", cmd.join(" "))));
-            let (prog, args) = cmd.split_first().unwrap();
-            let mut child = match Command::new(prog)
-                .args(args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(InstallMsg::Error(format!("{label}: {e}")));
-                    return;
-                }
-            };
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-            let tx_out = tx.clone();
-            let tx_err = tx.clone();
-            let h_out = std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let _ = tx_out.send(InstallMsg::Line(line));
-                }
-            });
-            let h_err = std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    let _ = tx_err.send(InstallMsg::Line(line));
-                }
-            });
-            let status = match child.wait() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(InstallMsg::Error(format!("{label}: {e}")));
-                    return;
-                }
-            };
-            let _ = h_out.join();
-            let _ = h_err.join();
-            if !status.success() {
-                let _ = tx.send(InstallMsg::Error(format!(
-                    "{label}: exit {}",
-                    status.code().unwrap_or(-1)
-                )));
-                return;
-            }
+        let steps = build_install_steps(&venv);
+        if run_all_install_steps(&steps, &tx) {
+            let _ = tx.send(InstallMsg::Done);
         }
-        let _ = tx.send(InstallMsg::Done);
     });
 }
 

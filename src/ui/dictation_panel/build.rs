@@ -1,4 +1,5 @@
 use super::{PillPhase, PILL_H, PILL_W, WAVE_H, WAVE_W, WIN_H, WIN_W, CSS};
+use gtk4::cairo;
 use crate::storage::config::PanelMode;
 use crate::ui::tray::WHISPER_MODELS;
 use gtk4::prelude::*;
@@ -169,38 +170,52 @@ pub(super) fn build_waveform_area(
     area.set_size_request(WAVE_W, WAVE_H);
     area.set_valign(gtk4::Align::Center);
     area.set_draw_func(move |_, cr, w, h| {
-        let hist = history.borrow();
-        let n = hist.len().max(1);
-        let bar_w = (w as f64 / n as f64) * 0.55;
-        let gap = (w as f64 / n as f64) - bar_w;
-        let center_y = h as f64 / 2.0;
-        match phase.get() {
-            PillPhase::Recording => cr.set_source_rgba(1.0, 0.32, 0.32, 0.95),
-            PillPhase::RecordingPtt => cr.set_source_rgba(0.788, 0.235, 1.0, 0.95),
-            PillPhase::Processing => cr.set_source_rgba(1.0, 0.68, 0.18, 0.95),
-            PillPhase::Done => cr.set_source_rgba(0.15, 0.75, 0.40, 0.95),
-        }
-        for (i, &lvl) in hist.iter().enumerate() {
-            let l = lvl.clamp(0.0, 1.0) as f64;
-            let scaled = (l.sqrt() * 2.2).min(1.0);
-            let bar_h = (scaled * h as f64 * 0.9).max(2.0);
-            let x = i as f64 * (bar_w + gap) + gap * 0.5;
-            let y = center_y - bar_h / 2.0;
-            let r = (bar_w / 2.0).min(bar_h / 2.0);
-            cr.move_to(x + r, y);
-            cr.line_to(x + bar_w - r, y);
-            cr.arc(x + bar_w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
-            cr.line_to(x + bar_w, y + bar_h - r);
-            cr.arc(x + bar_w - r, y + bar_h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
-            cr.line_to(x + r, y + bar_h);
-            cr.arc(x + r, y + bar_h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-            cr.line_to(x, y + r);
-            cr.arc(x + r, y + r, r, std::f64::consts::PI, std::f64::consts::PI * 1.5);
-            cr.close_path();
-            let _ = cr.fill();
-        }
+        draw_waveform_bars(cr, w, h, &history.borrow(), phase.get());
     });
     area
+}
+
+fn draw_waveform_bars(cr: &cairo::Context, w: i32, h: i32, hist: &VecDeque<f32>, phase: PillPhase) {
+    let n = hist.len().max(1);
+    let bar_w = (w as f64 / n as f64) * 0.55;
+    let gap = (w as f64 / n as f64) - bar_w;
+    let center_y = h as f64 / 2.0;
+    set_waveform_color_for_phase(cr, phase);
+    for (i, &lvl) in hist.iter().enumerate() {
+        draw_bar_at(cr, i, lvl, bar_w, gap, center_y, h);
+    }
+}
+
+fn set_waveform_color_for_phase(cr: &cairo::Context, phase: PillPhase) {
+    match phase {
+        PillPhase::Recording    => cr.set_source_rgba(1.0,   0.32,  0.32,  0.95),
+        PillPhase::RecordingPtt => cr.set_source_rgba(0.788, 0.235, 1.0,   0.95),
+        PillPhase::Processing   => cr.set_source_rgba(1.0,   0.68,  0.18,  0.95),
+        PillPhase::Done         => cr.set_source_rgba(0.15,  0.75,  0.40,  0.95),
+    }
+}
+
+fn draw_bar_at(cr: &cairo::Context, i: usize, lvl: f32, bar_w: f64, gap: f64, center_y: f64, h: i32) {
+    let l = (lvl as f64).clamp(0.0, 1.0);
+    let bar_h = ((l.sqrt() * 2.2).min(1.0) * h as f64 * 0.9).max(2.0);
+    let x = i as f64 * (bar_w + gap) + gap * 0.5;
+    let y = center_y - bar_h / 2.0;
+    let r = (bar_w / 2.0).min(bar_h / 2.0);
+    draw_rounded_rect(cr, x, y, bar_w, bar_h, r);
+    let _ = cr.fill();
+}
+
+fn draw_rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    cr.move_to(x + r, y);
+    cr.line_to(x + w - r, y);
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.line_to(x + w, y + h - r);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.line_to(x + r, y + h);
+    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    cr.line_to(x, y + r);
+    cr.arc(x + r, y + r, r, std::f64::consts::PI, std::f64::consts::PI * 1.5);
+    cr.close_path();
 }
 
 pub(super) fn build_window(app: &Application, mode: PanelMode, child: &GtkBox) -> ApplicationWindow {

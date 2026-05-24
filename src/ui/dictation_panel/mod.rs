@@ -435,14 +435,7 @@ impl DictationPanel {
     pub fn append_segment(&self, seg: &str) {
         let buf = self.text_view.buffer();
         let existing = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-        let to_insert = if existing.is_empty()
-            || existing.ends_with(' ')
-            || seg.starts_with(' ')
-        {
-            seg.to_string()
-        } else {
-            format!(" {seg}")
-        };
+        let to_insert = space_join(&existing, seg);
         buf.insert(&mut buf.end_iter(), &to_insert);
     }
 

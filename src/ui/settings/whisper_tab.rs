@@ -139,58 +139,66 @@ fn wire_model_download_button(
     whisper_port: u16,
     refresh_state: impl Fn() + Clone + 'static,
 ) {
-    let spinner = spinner.clone();
-    let delete_btn = delete_btn.clone();
-    let status_lbl = status_lbl.clone();
-    let model_combo = model_combo.clone();
+    let (spinner, delete_btn, status_lbl, model_combo) =
+        (spinner.clone(), delete_btn.clone(), status_lbl.clone(), model_combo.clone());
     download_btn.connect_clicked(move |btn| {
         let Some(id) = model_combo.active_id() else { return };
         let id = id.to_string();
-        btn.set_sensitive(false);
-        delete_btn.set_sensitive(false);
-        spinner.set_visible(true);
-        spinner.start();
-        status_lbl.set_text(&format!("Lade {id} herunter — kann ein paar Minuten dauern…"));
-
-        let (tx, rx) = mpsc::channel::<Result<(), String>>();
-        let id_clone = id.clone();
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(r) => r,
-                Err(e) => { let _ = tx.send(Err(format!("Tokio-Runtime: {e}"))); return; }
-            };
-            let _ = tx.send(rt.block_on(async {
-                WhisperClient::new(whisper_port).ensure_model(&id_clone).await
-            }));
-        });
-
-        let spinner = spinner.clone();
-        let status_lbl = status_lbl.clone();
-        let refresh_state = refresh_state.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            match rx.try_recv() {
-                Ok(Ok(())) => {
-                    spinner.stop(); spinner.set_visible(false);
-                    status_lbl.set_markup("<b>✓ Download abgeschlossen.</b>");
-                    refresh_state();
-                    glib::ControlFlow::Break
-                }
-                Ok(Err(e)) => {
-                    spinner.stop(); spinner.set_visible(false);
-                    status_lbl.set_text(&format!("✗ Fehler: {e}"));
-                    refresh_state();
-                    glib::ControlFlow::Break
-                }
-                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    spinner.stop(); spinner.set_visible(false);
-                    status_lbl.set_text("✗ Download-Thread abgebrochen.");
-                    refresh_state();
-                    glib::ControlFlow::Break
-                }
-            }
-        });
+        show_download_in_progress(btn, &delete_btn, &spinner, &status_lbl, &id);
+        let rx = start_model_download_thread(&id, whisper_port);
+        poll_download_result_until_done(rx, btn.clone(), spinner.clone(), status_lbl.clone(), refresh_state.clone());
     });
+}
+
+fn show_download_in_progress(btn: &Button, delete_btn: &Button, spinner: &Spinner, status_lbl: &Label, model_id: &str) {
+    btn.set_sensitive(false);
+    delete_btn.set_sensitive(false);
+    spinner.set_visible(true);
+    spinner.start();
+    status_lbl.set_text(&format!("Lade {model_id} herunter — kann ein paar Minuten dauern…"));
+}
+
+fn start_model_download_thread(model_id: &str, whisper_port: u16) -> mpsc::Receiver<Result<(), String>> {
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let id = model_id.to_string();
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(r) => r,
+            Err(e) => { let _ = tx.send(Err(format!("Tokio-Runtime: {e}"))); return; }
+        };
+        let _ = tx.send(rt.block_on(async { WhisperClient::new(whisper_port).ensure_model(&id).await }));
+    });
+    rx
+}
+
+fn poll_download_result_until_done(
+    rx: mpsc::Receiver<Result<(), String>>,
+    btn: Button,
+    spinner: Spinner,
+    status_lbl: Label,
+    refresh_state: impl Fn() + 'static,
+) {
+    glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+        match rx.try_recv() {
+            Ok(result) => finish_download_and_refresh(&btn, &spinner, &status_lbl, result, &refresh_state),
+            Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                finish_download_and_refresh(&btn, &spinner, &status_lbl, Err("Download-Thread abgebrochen.".into()), &refresh_state)
+            }
+        }
+    });
+}
+
+fn finish_download_and_refresh(btn: &Button, spinner: &Spinner, status_lbl: &Label, result: Result<(), String>, refresh: &impl Fn()) -> glib::ControlFlow {
+    spinner.stop();
+    spinner.set_visible(false);
+    btn.set_sensitive(true);
+    match result {
+        Ok(()) => status_lbl.set_markup("<b>✓ Download abgeschlossen.</b>"),
+        Err(e) => status_lbl.set_text(&format!("✗ {e}")),
+    }
+    refresh();
+    glib::ControlFlow::Break
 }
 
 fn wire_model_delete_button(

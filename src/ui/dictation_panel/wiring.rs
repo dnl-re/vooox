@@ -105,17 +105,16 @@ pub(super) fn wire_drag_gestures(
 
 fn click_landed_on(header: &GtkBox, target: &MenuButton, x: f64, y: f64) -> bool {
     let Some(picked) = header.pick(x, y, gtk4::PickFlags::DEFAULT) else { return false };
-    let mut w = Some(picked);
-    while let Some(cur) = w {
-        if cur.eq(target) {
-            return true;
-        }
-        w = cur.parent();
-        if let Some(ref p) = w {
-            if p.eq(header) {
-                return false;
-            }
+    is_target_in_ancestry(picked, target, header)
+}
+
+fn is_target_in_ancestry(mut widget: gtk4::Widget, target: &MenuButton, stop_at: &GtkBox) -> bool {
+    loop {
+        if widget.eq(target) { return true; }
+        match widget.parent() {
+            Some(p) if p.eq(stop_at) => return false,
+            Some(p) => widget = p,
+            None => return false,
         }
     }
-    false
 }

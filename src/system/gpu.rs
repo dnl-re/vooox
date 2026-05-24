@@ -136,37 +136,39 @@ pub fn estimated_download_label() -> &'static str {
 /// Spawnt einen Hintergrund-Thread, der die CUDA-Wheels ins venv installiert
 /// und stdout/stderr live über den Channel streamt.
 pub fn spawn_cuda_install_thread(tx: mpsc::Sender<InstallMsg>) {
-    std::thread::spawn(move || {
-        let pip = paths::venv_dir().join("bin/pip");
-        if !pip.exists() {
-            let _ = tx.send(InstallMsg::Error(format!(
-                "pip nicht gefunden unter {} — Setup zuerst abschließen.",
-                pip.display()
-            )));
-            return;
-        }
-        let install_args = build_pip_install_args();
-        announce_install_command(&tx, &pip, &install_args);
+    std::thread::spawn(move || run_cuda_pip_install(tx));
+}
 
-        let mut child = match start_cuda_install_process(&pip, &install_args) {
-            Ok(c) => c,
-            Err(e) => { let _ = tx.send(InstallMsg::Error(e)); return; }
-        };
-        stream_process_output_to_channel(&mut child, &tx);
+fn run_cuda_pip_install(tx: mpsc::Sender<InstallMsg>) {
+    let pip = paths::venv_dir().join("bin/pip");
+    if !pip.exists() {
+        let _ = tx.send(InstallMsg::Error(format!("pip nicht gefunden unter {} — Setup zuerst abschließen.", pip.display())));
+        return;
+    }
+    let install_args = build_pip_install_args();
+    announce_install_command(&tx, &pip, &install_args);
+    let Some(mut child) = start_pip_process_or_report_error(&pip, &install_args, &tx) else { return; };
+    stream_process_output_to_channel(&mut child, &tx);
+    report_install_exit_status(child.wait(), &tx);
+}
 
-        let status = match child.wait() {
-            Ok(s) => s,
-            Err(e) => { let _ = tx.send(InstallMsg::Error(format!("pip wait: {e}"))); return; }
-        };
-        if status.success() {
-            let _ = tx.send(InstallMsg::Done);
-        } else {
-            let _ = tx.send(InstallMsg::Error(format!(
-                "pip install exit {}",
-                status.code().unwrap_or(-1)
-            )));
-        }
-    });
+fn start_pip_process_or_report_error(
+    pip: &std::path::Path,
+    args: &[String],
+    tx: &mpsc::Sender<InstallMsg>,
+) -> Option<std::process::Child> {
+    match start_cuda_install_process(pip, args) {
+        Ok(child) => Some(child),
+        Err(e) => { let _ = tx.send(InstallMsg::Error(e)); None }
+    }
+}
+
+fn report_install_exit_status(result: std::io::Result<std::process::ExitStatus>, tx: &mpsc::Sender<InstallMsg>) {
+    match result {
+        Err(e) => { let _ = tx.send(InstallMsg::Error(format!("pip wait: {e}"))); }
+        Ok(s) if !s.success() => { let _ = tx.send(InstallMsg::Error(format!("pip install exit {}", s.code().unwrap_or(-1)))); }
+        Ok(_) => { let _ = tx.send(InstallMsg::Done); }
+    }
 }
 
 fn build_pip_install_args() -> Vec<String> {
@@ -192,22 +194,21 @@ fn start_cuda_install_process(
 }
 
 fn stream_process_output_to_channel(child: &mut std::process::Child, tx: &mpsc::Sender<InstallMsg>) {
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let tx_out = tx.clone();
-    let tx_err = tx.clone();
-    let h_out = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = tx_out.send(InstallMsg::Line(line));
-        }
-    });
-    let h_err = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = tx_err.send(InstallMsg::Line(line));
-        }
-    });
+    let h_out = stream_pipe_lines_to_channel(child.stdout.take().unwrap(), tx.clone());
+    let h_err = stream_pipe_lines_to_channel(child.stderr.take().unwrap(), tx.clone());
     let _ = h_out.join();
     let _ = h_err.join();
+}
+
+fn stream_pipe_lines_to_channel<R: std::io::Read + Send + 'static>(
+    pipe: R,
+    tx: mpsc::Sender<InstallMsg>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+            let _ = tx.send(InstallMsg::Line(line));
+        }
+    })
 }
 
 #[cfg(test)]
