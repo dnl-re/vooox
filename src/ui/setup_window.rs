@@ -484,6 +484,19 @@ fn handle_install_error_message(
     (true, true)
 }
 
+/// Processes one install message. Returns `Some((done, had_error))` when the loop should stop.
+fn process_single_install_message(
+    m: InstallMsg,
+    log_buffer: &TextBuffer,
+    log_view: &TextView,
+) -> Option<(bool, bool)> {
+    match m {
+        InstallMsg::Line(line) => { append_log(log_buffer, log_view, &line); None }
+        InstallMsg::Done => Some((true, false)),
+        InstallMsg::Error(e) => Some(handle_install_error_message(&e, log_buffer, log_view)),
+    }
+}
+
 /// Drains all pending messages from the channel.
 /// Returns `(done, had_error)`.
 fn drain_install_message_queue(
@@ -491,19 +504,12 @@ fn drain_install_message_queue(
     log_buffer: &TextBuffer,
     log_view: &TextView,
 ) -> (bool, bool) {
-    let mut done = false;
-    let mut had_error = false;
     while let Ok(m) = rx.try_recv() {
-        match m {
-            InstallMsg::Line(line) => append_log(log_buffer, log_view, &line),
-            InstallMsg::Done => { done = true; break; }
-            InstallMsg::Error(e) => {
-                (done, had_error) = handle_install_error_message(&e, log_buffer, log_view);
-                break;
-            }
+        if let Some(result) = process_single_install_message(m, log_buffer, log_view) {
+            return result;
         }
     }
-    (done, had_error)
+    (false, false)
 }
 
 fn poll_install_messages(
