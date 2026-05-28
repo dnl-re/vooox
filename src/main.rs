@@ -1,3 +1,4 @@
+#[path = "audio/mod.rs"]
 mod audio;
 mod storage;
 mod system;
